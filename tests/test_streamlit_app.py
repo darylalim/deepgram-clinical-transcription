@@ -967,6 +967,7 @@ import os
 import sys
 from unittest.mock import MagicMock
 from streamlit.testing.v1 import AppTest
+from streamlit.testing.v1.element_tree import Block
 
 app = sys.argv[1]
 
@@ -1000,8 +1001,10 @@ def _resp(transcript, words, duration, confidence):
 
 def _widget_keys_in_order(node, acc):
     # Depth-first walk of the element tree, collecting widget keys in document order.
+    # Containers are skipped: since Streamlit 1.64 the st.form Block carries its form
+    # id ("features") as .key, which is a container, not a Features control.
     for child in getattr(node, "children", {}).values():
-        if getattr(child, "key", None):
+        if not isinstance(child, Block) and getattr(child, "key", None):
             acc.append(child.key)
         _widget_keys_in_order(child, acc)
 
