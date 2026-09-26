@@ -1,30 +1,30 @@
-# Nord theme for the Deepgram Medical Transcription UI.
-# Arctic, north-bluish palette (Polar Night / Snow Storm / Frost / Aurora).
+# "Reading room" — a clinical theme pair for the Deepgram Medical Transcription UI.
+# Named for the dim, neutral rooms where clinicians read imaging for hours: a low-chroma
+# blue-slate palette that keeps long transcript review easy on the eyes, one clinical-teal
+# accent, and a status/speaker palette tuned so every derived color clears WCAG AA.
+# The light mode ("clinical white") mirrors the dark one: its text is the dark canvas
+# ink, and each speaker keeps the same hue family in both modes.
 #
-# SINGLE MODE, BY DESIGN. Only [theme] is defined — no [theme.light] / [theme.dark].
-# Streamlit exposes the Light/Dark/System switcher in the Settings menu *only* when
-# both mode tables exist, so one table locks the app to this palette and removes the
-# toggle. Adding either mode table back would restore the switcher.
+# TWO MODES, FOLLOWING THE OS. [theme] holds only what both modes share (typography,
+# shape); colors live in [theme.dark] / [theme.light] and their .sidebar tables.
+# Streamlit shows the Light/Dark/System switcher in the Settings menu *only* when both
+# mode tables exist, and starts on "System" (the viewer's OS preference). Deleting
+# either mode table locks the app to the other and removes the switcher. There is
+# deliberately no `base` key: with both mode tables present, each mode already starts
+# from Streamlit's matching built-in base.
+#
+# Every contrast figure below is WCAG 2.x, computed against the exact color Streamlit
+# renders — including the ones it DERIVES rather than reads from here (1.64 frontend):
+#                          dark mode                     light mode
+#   <c>BackgroundColor  = <c>Color at 20% alpha         <c>Color at 10% alpha   (alerts, speaker tints)
+#   <c>TextColor        = <c>Color +15 HSL lightness    <c>Color -15 lightness  (alert body text)
+# and captions are body text at 60% opacity. So a palette change has to be re-checked on
+# the derived pair, not just the swatch.
 #
 # Pure configuration — no Python, so it never touches the test suite.
 [theme]
-base = "dark"
 
-# Core surfaces — Polar Night, layered lightest-on-top for depth.
-primaryColor = "#5E81AC"             # nord10 frost: Run button, active tab underline, focus rings
-# NOT nord8 #88C0D0, which is Nord's canonical accent. `primaryColor` is the background of the
-# type="primary" Run submit button, and Streamlit hardcodes that label white — there is no
-# `primaryTextColor` among the 277 theme options. Measured in-browser: white on #88C0D0 is
-# 2.00:1 (washed out); on nord10 it is 4.03:1. Same Frost family, readable button.
-backgroundColor = "#2E3440"          # nord0 main canvas
-secondaryBackgroundColor = "#3B4252" # nord1 widget / container backgrounds
-codeBackgroundColor = "#3B4252"      # nord1 — JSON tab blocks match the widget surface
-textColor = "#ECEFF4"                # nord6 snow storm body text (~13:1 on nord0)
-codeTextColor = "#D8DEE9"            # nord4 — code sits a step quieter than body text
-linkColor = "#81A1C1"                # nord9 frost
-borderColor = "#4C566A"              # nord3 widget borders
-
-# Shape — Nord's convention is a tighter radius than Streamlit's default.
+# Shape — a tight radius keeps controls crisp and instrument-like.
 baseRadius = "4px"
 buttonRadius = "4px"
 showWidgetBorder = true
@@ -33,8 +33,8 @@ linkUnderline = false                # color alone signals links — cleaner tha
 
 # Typography — Inter (UI) and JetBrains Mono (JSON/code view), SELF-HOSTED from
 # static/ (see the [[theme.fontFaces]] tables below + [server].enableStaticServing).
-# The upstream Nord template loads these two families from Google Fonts; that is
-# deliberately NOT used here — no request ever leaves the app to a third-party font
+# Streamlit's bundled theme templates load these families from Google Fonts; that is
+# deliberately NOT done here — no request ever leaves the app to a third-party font
 # CDN, which matters for a PHI app. Streamlit falls back to the system sans / mono
 # stack if a face fails to load.
 font = "Inter"
@@ -44,22 +44,6 @@ baseFontSize = 14
 baseFontWeight = 400
 headingFontSizes = ["32px", "24px", "20px", "16px", "14px", "12px"]
 headingFontWeights = [600, 600, 600, 600, 600, 600]
-
-# Semantic palette — Frost + Aurora. These back the diarized speaker-label
-# highlights (`:{color}-background[**Speaker N:**]` from _SPEAKER_COLORS, which is
-# ("blue", "green", "violet", "orange", "red", "gray")) and the status accents.
-# All six names must stay defined or a speaker line falls back to Streamlit's default.
-blueColor = "#81A1C1"                # nord9  — Speaker 1
-greenColor = "#A3BE8C"               # nord14 — Speaker 2 / success accents
-violetColor = "#B48EAD"              # nord15 — Speaker 3
-orangeColor = "#D08770"              # nord12 — Speaker 4
-redColor = "#BF616A"                 # nord11 — Speaker 5 / error accents (st.error)
-grayColor = "#D8DEE9"                # nord4  — Speaker 6 / unlabeled-speaker fallback
-yellowColor = "#EBCB8B"              # nord13 — warning accents (st.warning)
-
-# Unused today (the app renders no charts), kept so st.metric sparklines and any
-# future chart inherit the Nord ramp instead of Streamlit's stock categorical colors.
-chartCategoricalColors = ["#88C0D0", "#81A1C1", "#5E81AC", "#A3BE8C", "#EBCB8B", "#D08770", "#BF616A"]
 
 [[theme.fontFaces]]
 family = "Inter"
@@ -86,13 +70,114 @@ family = "JetBrains Mono"
 url = "app/static/jetbrains-mono-500.woff2"
 weight = 500
 
-# Sidebar (the Features form) — one Polar Night step lighter than the main canvas,
-# so app-level settings read as a distinct surface from the transcript output.
-[theme.sidebar]
-backgroundColor = "#3B4252"          # nord1
-secondaryBackgroundColor = "#434C5E" # nord2 — widgets inside the sidebar
-codeBackgroundColor = "#434C5E"      # nord2
-borderColor = "#4C566A"              # nord3
+# ── Dark: "reading room" ────────────────────────────────────────────────────────────
+[theme.dark]
+
+# Core surfaces — blue-slate (hue ~205°), layered lightest-on-top for depth.
+backgroundColor = "#11171B"          # canvas — deep, not pure black (no halation on text)
+secondaryBackgroundColor = "#1B2329" # widget / container backgrounds, one step up
+codeBackgroundColor = "#1B2329"      # JSON tab blocks match the widget surface
+textColor = "#E3E9ED"                # body 14.75:1 on canvas; captions (60%) 5.96:1
+codeTextColor = "#C3CED6"            # code sits a step quieter than body text (9.95:1)
+linkColor = "#6EB3EA"                # conventional link blue, 8.00:1 on canvas
+borderColor = "#36434D"              # widget borders — visible edge without busy outlines
+
+# Accent — clinical teal, SPLIT BY ZONE in this mode only. Streamlit hardcodes the
+# label of a type="primary" button white (no `primaryTextColor` exists), and on this
+# dark canvas no single teal can both carry a white label (>=4.5:1) AND read as text
+# itself (>=4.5:1 on canvas): the two bands do not overlap. So each zone gets the teal
+# its job needs:
+#   main    — #2EB3A5, 6.98:1 on canvas: active tab label + underline, focus rings,
+#             the st.status progress bar. Nothing here puts white text on primary.
+#   sidebar — #1D7F75 in [theme.dark.sidebar] below: fills the Run button and the
+#             multiselect chips (white label 4.83:1) and the toggles (3.33:1 on the sidebar).
+# Moving the Run button (the app's only type="primary") out of the sidebar breaks this
+# split: its label would drop to 2.59:1 on the main teal. (Light mode needs no split.)
+primaryColor = "#2EB3A5"
+
+# Semantic palette. These back the diarized speaker-label highlights
+# (`:{color}-background[**Speaker N:**]` from _SPEAKER_COLORS, which is
+# ("blue", "green", "violet", "orange", "red", "gray")) and the status callouts.
+# All six speaker names must stay defined IN BOTH MODES or a line falls back to
+# Streamlit's default. Hues are spread ~60° apart so neighbouring speakers never share
+# a family; color is never the only cue (every line also says "Speaker N:"), which keeps
+# diarization readable under color-vision deficiency. On its 20% tint, body text stays
+# >=9.5:1 and the derived callout text >=6.9:1 for every entry.
+blueColor = "#5B9FE0"                # Speaker 1 / st.info
+greenColor = "#4DBA7F"               # Speaker 2 / success accents
+violetColor = "#AE8BE6"              # Speaker 3
+orangeColor = "#E39A4C"              # Speaker 4
+redColor = "#E5605F"                 # Speaker 5 / st.error — derived text 7.00:1 on its tint
+grayColor = "#98A4AE"                # Speaker 6 / unlabeled-speaker fallback
+yellowColor = "#E3C35A"              # st.warning
+
+# Unused today (the app renders no charts), kept so st.metric sparklines and any
+# future chart open on the accent then follow the speaker order.
+chartCategoricalColors = ["#2EB3A5", "#5B9FE0", "#4DBA7F", "#AE8BE6", "#E39A4C", "#E5605F", "#98A4AE"]
+
+# Sidebar (the Features form) — one slate step lighter than the canvas, so app-level
+# settings read as a distinct surface from the transcript output. Its primaryColor is
+# the deeper half of the split teal (see primaryColor above).
+[theme.dark.sidebar]
+primaryColor = "#1D7F75"
+backgroundColor = "#1A2228"          # body 13.15:1; captions (60%) 5.59:1
+secondaryBackgroundColor = "#232D34" # widgets inside the sidebar
+codeBackgroundColor = "#232D34"
+borderColor = "#3A4852"
+
+# ── Light: "clinical white" ─────────────────────────────────────────────────────────
+[theme.light]
+
+# Core surfaces — true white canvas, the same blue-slate hue carried into the grays.
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#EFF3F5" # widget / container backgrounds, one step down
+codeBackgroundColor = "#EFF3F5"
+textColor = "#0F171C"                # slate ink, 18.11:1 — darker than it needs to be
+# for body text ON PURPOSE: captions render it at 60% opacity, and anything lighter
+# (e.g. #18232A) drops them to 4.19:1 on the sidebar. At #0F171C they hold 4.63:1.
+codeTextColor = "#2B3A44"            # 10.50:1 on the code surface
+linkColor = "#1F6FB8"                # 5.22:1 on canvas
+borderColor = "#C8D2D9"
+
+# Accent — ONE teal. On a light canvas the constraints that force the dark-mode split
+# coincide: a teal dark enough to carry the white Run label is automatically dark
+# enough to read as text on white. #177268: white label 5.76:1, active-tab text 5.76:1
+# on canvas, toggles 5.31:1 on the sidebar.
+primaryColor = "#177268"
+
+# Semantic palette — same hue family per speaker as dark mode, deepened for a light
+# canvas.
+blueColor = "#2F7BC4"                # Speaker 1 / st.info
+greenColor = "#2E9A62"               # Speaker 2 / success accents
+violetColor = "#8A63D2"              # Speaker 3
+orangeColor = "#C9711E"              # Speaker 4
+redColor = "#D1403F"                 # Speaker 5 / st.error
+grayColor = "#6B7882"                # Speaker 6 / unlabeled-speaker fallback
+yellowColor = "#B8900F"              # st.warning
+
+# Tints, set EXPLICITLY at 20% — the same strength dark mode derives on its own.
+# Streamlit's light-mode default is 10%, which leaves the speaker highlights at
+# 1.10–1.15:1 against white: speakers 1, 2, 3 and 6 all read as the same pale wash.
+# At 20% they separate from the canvas at 1.21–1.33:1 (dark mode: 1.29–1.55:1).
+# Callout text is still derived from the main colors (−15 lightness), and on these
+# stronger tints it holds >=5.48:1 (yellow, the lowest); body text >=13.66:1.
+blueBackgroundColor = "#D5E5F3"
+greenBackgroundColor = "#D5EBE0"
+violetBackgroundColor = "#E8E0F6"
+orangeBackgroundColor = "#F4E3D2"
+redBackgroundColor = "#F6D9D9"
+grayBackgroundColor = "#E1E4E6"
+yellowBackgroundColor = "#F1E9CF"
+
+chartCategoricalColors = ["#177268", "#2F7BC4", "#2E9A62", "#8A63D2", "#C9711E", "#D1403F", "#6B7882"]
+
+# Sidebar — a cool gray panel one step down from the white canvas (the light-mode
+# mirror of the dark sidebar's one step up). Inherits the single light teal.
+[theme.light.sidebar]
+backgroundColor = "#F3F6F8"          # body 16.69:1; captions (60%) 4.63:1
+secondaryBackgroundColor = "#E6ECEF" # widgets inside the sidebar
+codeBackgroundColor = "#E6ECEF"
+borderColor = "#C3CDD4"
 
 # Serve the bundled fonts under static/ at app/static/* (referenced by the
 # [[theme.fontFaces]] URLs above). Keeps typography first-party — no font CDN.
