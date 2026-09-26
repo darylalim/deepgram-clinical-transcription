@@ -167,7 +167,7 @@ Managed by uv via `pyproject.toml` + `uv.lock`. **Every dependency is pinned exa
 
 Runtime: **deepgram-sdk** (v7), **streamlit**, **python-dotenv**
 
-Dev: **ruff**, **ty**, **pytest**, **PyYAML** (used by the config-guard tests — `tests/test_ci_workflow.py`, `tests/test_release_workflow.py`, `tests/test_automerge_workflow.py`, `tests/test_dependabot.py` — to parse the workflow / Dependabot YAML)
+Dev: **ruff**, **ty**, **pytest**, **PyYAML** (used by the config-guard tests — `tests/test_ci_workflow.py`, `tests/test_release_workflow.py`, `tests/test_automerge_workflow.py`, `tests/test_dependabot.py` — to parse the workflow / Dependabot YAML), **watchdog** (lets `streamlit run` use native file-system events for hot-reload instead of polling; dev-only, so deployed hosts don't need it)
 
 Ruff lint config: `[tool.ruff.lint]` selects `E`/`F`/`I`/`UP`/`B` and ignores `E501` (line length is formatter-driven); `combine-as-imports = true` sits in the **`[tool.ruff.lint.isort]`** sub-table (keeps the UI's aliased re-exports in one block). The sub-table is required, not stylistic — `combine-as-imports` is an isort setting, and under `[tool.ruff.lint]` it is an unknown field that makes ruff refuse to load the config at all, failing **both** the `ruff format` and `ruff check` gates.
 
