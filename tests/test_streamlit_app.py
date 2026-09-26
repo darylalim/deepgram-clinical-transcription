@@ -935,7 +935,8 @@ class TestAppSmoke:
 
     - **empty state** — module load (``set_page_config`` ordering, the ``st.form``
       structure, the dynamic-tab ``.open`` access) plus the idle UI: the placeholder
-      caption, a disabled Run button, and the Features control order
+      caption, a disabled Run button, the inputs | output column split, and the
+      Features control order
       (``language, keyterms, smart_format, diarize, dictation, measurements, redact``).
     - **seeded diarized** — renders the Transcript tab for a diarized result, asserting
       the exact 1-based color-directive speaker lines, the Duration/Confidence metric
@@ -1014,12 +1015,26 @@ def _widget_keys_in_order(node, acc):
 at = AppTest.from_file(app, default_timeout=30).run()
 assert not at.exception, at.exception
 assert at.title[0].value == "Deepgram Medical Transcription"
-assert any("Select audio above" in c.value for c in at.caption), [c.value for c in at.caption]
+assert any("Select audio, then click Run" in c.value for c in at.caption), [c.value for c in at.caption]
 run = [b for b in at.button if b.label == "Run"]
 assert run and run[0].disabled, "Run should be disabled with no audio input"
 # Key was seeded, so no api-key warning fires — this pins the disable to the
 # no-input branch (`not has_input`), not the no-key branch (`not api_key`).
 assert not at.warning, [w.value for w in at.warning]
+
+# Main area is a side-by-side split: audio inputs on the left, output panel (with its
+# empty-state placeholder) on the right — the output is not stacked under the inputs.
+inputs, output = at.main.columns
+assert [t.label for t in inputs.tabs] == [
+    ":material/upload: Upload",
+    ":material/mic: Record",
+    ":material/link: URL",
+]
+assert [t.label for t in output.tabs] == [
+    ":material/description: Transcript",
+    ":material/data_object: JSON",
+]
+assert any("Select audio, then click Run" in c.value for c in output.caption)
 
 # Features live in the sidebar and render in the intended order: inputs (Language,
 # Keyterm) first, the four toggles grouped, Redact deliberately last.

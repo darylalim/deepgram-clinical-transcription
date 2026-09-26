@@ -38,7 +38,13 @@ load_dotenv()
 
 MAX_RECORDING_SECONDS = 10 * 60  # 10 minutes
 MAX_PLAYBACK_BYTES = 25 * 1024 * 1024  # larger uploads skip inline playback (memory)
-OUTPUT_HEIGHT = 400  # fixed height (px) of the Transcript/JSON output panel
+# Fixed height (px) of the Transcript/JSON output panel. Sized so a single result's
+# panel — below the title, output tabs, download row, and pinned player — ends above
+# the fold of a ~840px-tall viewport (1080p display minus browser chrome), avoiding a
+# page scroll nested around the panel's own scroll. Streamlit has no viewport-relative
+# height, so this is the tallest value that still fits.
+OUTPUT_HEIGHT = 480
+INPUT_OUTPUT_RATIO = (2, 3)  # main-area column widths: audio inputs | output panel
 
 # Material Symbol icons reused across status callouts (single-use icons stay inline).
 _ICON_ERROR = ":material/error:"
@@ -366,23 +372,25 @@ def _transcript_download(responses: list[tuple[str, Any]]) -> None:
         blocks = [f"{name}\n{_plain_transcript(r)}" for name, r in responses]
         return "\n\n".join(blocks)
 
-    st.download_button(
-        "Download transcript",
-        _build_transcript,
-        file_name="transcripts.txt",
-        mime="text/plain",
-        icon=":material/download:",
-    )
-    if len(responses) == 1:
-        srt = _to_srt(responses[0][1])
-        if srt:
-            st.download_button(
-                "Download subtitles (SRT)",
-                srt,
-                file_name="subtitles.srt",
-                mime="application/x-subrip",
-                icon=":material/subtitles:",
-            )
+    # One toolbar row rather than stacked buttons, so the output panel starts higher.
+    with st.container(horizontal=True):
+        st.download_button(
+            "Download transcript",
+            _build_transcript,
+            file_name="transcripts.txt",
+            mime="text/plain",
+            icon=":material/download:",
+        )
+        if len(responses) == 1:
+            srt = _to_srt(responses[0][1])
+            if srt:
+                st.download_button(
+                    "Download subtitles (SRT)",
+                    srt,
+                    file_name="subtitles.srt",
+                    mime="application/x-subrip",
+                    icon=":material/subtitles:",
+                )
 
 
 def _output_panel(
@@ -426,7 +434,7 @@ def _output_panel(
             render(response)
 
 
-PLACEHOLDER = ":material/graphic_eq: Select audio above, then click Run in the sidebar to see the response here."
+PLACEHOLDER = ":material/graphic_eq: Select audio, then click Run in the sidebar to see the response here."
 NO_TRANSCRIPT = "No transcript in this response."
 PLAYBACK_TOO_LARGE = "Inline playback unavailable for files over 25 MB."
 
@@ -485,27 +493,33 @@ if not api_key:
         label_visibility="collapsed",
     )
 
-tab_upload, tab_record, tab_url = st.tabs(
-    [":material/upload: Upload", ":material/mic: Record", ":material/link: URL"]
-)
+# Inputs and output sit side by side so a wide display shows the audio source and its
+# transcript at once — no scrolling past a full-width uploader to reach the result — and
+# transcript lines keep a readable length. Columns stack (inputs first) on narrow viewports.
+input_col, output_col = st.columns(INPUT_OUTPUT_RATIO, gap="medium")
 
-with tab_upload:
-    uploaded_files = st.file_uploader(
-        "Upload audio files",
-        type=_AUDIO_TYPES,
-        accept_multiple_files=True,
-        label_visibility="collapsed",
+with input_col:
+    tab_upload, tab_record, tab_url = st.tabs(
+        [":material/upload: Upload", ":material/mic: Record", ":material/link: URL"]
     )
 
-with tab_record:
-    recording = st.audio_input("Record a dictation", label_visibility="collapsed")
+    with tab_upload:
+        uploaded_files = st.file_uploader(
+            "Upload audio files",
+            type=_AUDIO_TYPES,
+            accept_multiple_files=True,
+            label_visibility="collapsed",
+        )
 
-with tab_url:
-    url_text = st.text_area(
-        "Enter audio file URLs (one per line)",
-        placeholder="https://example.com/audio.mp3\nhttps://example.com/another.mp3",
-        label_visibility="collapsed",
-    )
+    with tab_record:
+        recording = st.audio_input("Record a dictation", label_visibility="collapsed")
+
+    with tab_url:
+        url_text = st.text_area(
+            "Enter audio file URLs (one per line)",
+            placeholder="https://example.com/audio.mp3\nhttps://example.com/another.mp3",
+            label_visibility="collapsed",
+        )
 
 
 # Features live in the sidebar — the canonical home for app-level settings — so the
@@ -573,7 +587,11 @@ with st.sidebar:
             width="stretch",
         )
 
+# Run feedback (validation callouts, the progress status, per-item errors) lands under
+# the inputs that produced it, keeping the output column's top edge fixed.
 if run_clicked:
-    _run(api_key, uploaded_files, recording, url_text)
+    with input_col:
+        _run(api_key, uploaded_files, recording, url_text)
 
-_render_output()
+with output_col:
+    _render_output()
