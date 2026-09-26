@@ -4,7 +4,7 @@ name = "deepgram-medical-transcription"
 # gates on CI, creates the vX.Y.Z tag, and publishes the GitHub Release. Keep it
 # static and plain X.Y.Z — the workflow refuses anything else, and
 # tests/test_release_workflow.py pins the same shape so a bad bump fails locally.
-version = "0.8.1"
+version = "0.8.2"
 description = "Streamlit application for medical transcription using Deepgram's Nova-3 Medical model."
 readme = "README.md"
 authors = [{ name = "Daryl Lim" }]
@@ -12,17 +12,17 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
-    "deepgram-sdk==7.7.0",
+    "deepgram-sdk==7.10.0",
     "python-dotenv==1.2.3",
-    "streamlit==1.62.0",
+    "streamlit==1.64.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest==9.1.1",
     "pyyaml==6.0.3",
-    "ruff==0.16.4",
-    "ty==0.0.74",
+    "ruff==0.16.9",
+    "ty==0.0.84",
 ]
 
 [tool.ruff.lint]
