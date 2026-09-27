@@ -6,6 +6,13 @@ Streamlit application for medical transcription using Deepgram's Nova-3 Medical 
 
 > **Reference implementation — not certified for clinical use.** You are responsible for your own Deepgram BAA and PHI handling before any real patient data flows through this app. See [License](#license).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">
+  <img alt="The app showing a diarized clinic-visit transcript: a Features sidebar with keyterms, Diarize and Measurements enabled; an Upload tab holding clinic-visit.wav; and the Transcript tab with Duration and Confidence metrics, an audio player, and color-coded Speaker 1 / Speaker 2 lines." src="docs/screenshot-light.png">
+</picture>
+
+<sub>Screenshot uses a synthetic, fictional transcript — no real patient audio.</sub>
+
 ## Features
 
 - **Batch transcription** from three input sources — upload files, record from the microphone, or transcribe remote URLs.
@@ -36,7 +43,7 @@ uv run streamlit run streamlit_app.py
 
 If `DEEPGRAM_API_KEY` is not set, the app prompts for it inline.
 
-**Select audio** from the input tabs at the top:
+**Select audio** from the input tabs on the left:
 
 - **Upload** — up to 100 audio files (mp3, m4a, wav, flac, ogg; max 200 MB each)
 - **Record** — record from microphone (max 10 minutes)
@@ -55,7 +62,7 @@ A **Features** panel in the left sidebar holds the request options, closed by a 
 Once a request runs:
 
 - **Live progress** — a status panel tracks the batch, with a toast when it finishes.
-- **Transcript / JSON tabs** — full-width, displaying the response; multiple results are labeled and divided per file.
+- **Transcript / JSON tabs** — beside the inputs (stacked below them on narrow screens), displaying the response; multiple results are labeled and divided per file.
 - **Metrics & downloads** — each transcript is topped with **Duration** and **Confidence** metric cards and a **Download transcript** (`.txt`) button; a single result also offers **Download subtitles** (`.srt`, timestamped speaker-labeled cues).
 - **Audio player** — pinned above the scrollable transcript. Inline audio over 25 MB — a large upload or a long recording — shows a notice instead of the player to limit memory; remote URLs always get one.
 - **Diarized view** — with **Diarize** on, the transcript is split into color-coded `Speaker 1:`, `Speaker 2:`, … lines.
