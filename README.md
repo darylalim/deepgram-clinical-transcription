@@ -19,7 +19,7 @@ Streamlit application for medical transcription using Deepgram's Nova-3 Medical 
 - **Nova-3 Medical** speech-to-text across eight English variants.
 - **Keyterm prompting** — boost recognition of specialized vocabulary (drug names, procedures).
 - **Speaker diarization** with color-coded per-speaker transcript lines.
-- **Redaction** of PII, PHI, PCI, and numbers for de-identification.
+- **Redaction** — PII for de-identification, plus PHI, PCI, and number groups (PHI and Numbers also strip clinical content).
 - **Smart formatting**, spoken **dictation** commands, and **measurement** abbreviation.
 - **Downloads** — plain-text transcript and timestamped, speaker-labeled **SRT** subtitles.
 - **"Reading room" light & dark themes** — a clinical blue-slate palette with a teal accent that follows your OS light/dark setting (switchable in Settings), WCAG AA throughout in both modes, with self-hosted fonts (no third-party CDN).

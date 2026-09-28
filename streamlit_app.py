@@ -195,7 +195,7 @@ def _parse_urls(text: str) -> tuple[list[str], list[str]]:
 
 
 def _feature_opts() -> dict[str, Any]:
-    """Read the current Features-tab control values from session state."""
+    """Read the sidebar Features form's control values from session state."""
     return {
         "keyterms": st.session_state.get("keyterms", []),
         "language": st.session_state.get("language", DEFAULT_LANGUAGE),
@@ -522,7 +522,7 @@ with input_col:
         )
 
     with tab_record:
-        recording = st.audio_input("Record a dictation", label_visibility="collapsed")
+        recording = st.audio_input("Record audio", label_visibility="collapsed")
 
     with tab_url:
         url_text = st.text_area(
