@@ -15,6 +15,7 @@ Streamlit application for medical transcription using Deepgram's Nova-3 Medical 
 
 ## Features
 
+- **Sign-in** — OpenID Connect through Streamlit's `st.login` (Google Workspace, Microsoft Entra ID, Okta, …), limited to allowlisted email domains and verified emails, with a 12-hour session limit. The gate fails closed: a missing or broken configuration blocks the app instead of opening it. See [Access control](#access-control).
 - **Batch transcription** from two input sources — upload files or record from the microphone.
 - **Nova-3 Medical** speech-to-text across eight English variants.
 - **Keyterm prompting** — boost recognition of specialized vocabulary (drug names, procedures).
@@ -34,8 +35,17 @@ Streamlit application for medical transcription using Deepgram's Nova-3 Medical 
 
 ## Setup
 
-1. Install dependencies: `uv sync`
+1. Install dependencies: `uv sync` (this includes Authlib, through the `streamlit[auth]` extra).
 2. Create your env file: `cp .env.example .env`, then set `DEEPGRAM_API_KEY`.
+3. Configure sign-in: `cp .streamlit/secrets.toml.example .streamlit/secrets.toml`, then fill in your identity provider's client, a random `cookie_secret`, and your `allowed_email_domains`. See [Access control](#access-control). Until sign-in is configured, the app shows only "Sign-in is unavailable".
+
+**Local development without sign-in:** set the opt-out in the environment of the one command.
+
+```bash
+NOVA_ALLOW_ANONYMOUS=1 uv run streamlit run streamlit_app.py
+```
+
+The app honors it only for the exact value `1`, only when no `[auth]` is configured, and only from the process environment. Put in `.env` or `secrets.toml`, it blocks the app instead. An **Anonymous mode** banner stays on screen. Never use it with real patient audio.
 
 ## Usage
 
@@ -43,7 +53,7 @@ Streamlit application for medical transcription using Deepgram's Nova-3 Medical 
 uv run streamlit run streamlit_app.py
 ```
 
-If `DEEPGRAM_API_KEY` is not set, the app prompts for it inline.
+The app first asks you to **sign in** (unless you launched it in anonymous mode). Once you're signed in, the sidebar shows **Signed in as …** with a **Sign out** button. If `DEEPGRAM_API_KEY` is not set, the app then prompts for it inline.
 
 **Select audio** from the input tabs on the left:
 
@@ -93,10 +103,53 @@ A flag is a pointer to the audio, not a verdict — check flagged words first, b
 
 **Troubleshooting** — if transcription fails with a per-file error (rather than the app refusing to start), check that `DEEPGRAM_API_KEY` is valid and has available credit: an invalid or expired key is reported as a per-item transcription failure, not a startup error.
 
+## Access control
+
+Every visitor passes a sign-in gate before the app renders anything else: no inputs, no API-key prompt, no results. Sign-in is OpenID Connect through Streamlit's built-in `st.login`, configured in `.streamlit/secrets.toml` (template: `.streamlit/secrets.toml.example`). The policy lives in `nova/access.py` and **fails closed**. A missing, partial, or unreadable configuration blocks the app rather than falling back to anonymous access.
+
+| Situation | What the visitor sees |
+|---|---|
+| Sign-in configured, not signed in | A **Sign in** button (**Sign in with *Name*** for each extra provider) |
+| Signed in and allowed | The app, with **Signed in as …** and **Sign out** at the top of the sidebar |
+| Signed in but not allowed (domain, unverified email, no email) | Why, and **Sign out** |
+| Signed in more than 12 hours ago, or through a provider since removed | "Your sign-in has expired", and **Sign in** |
+| Not configured, or misconfigured | "Sign-in is unavailable. Contact your administrator." only. The reason, naming configuration keys but never values, goes to the server's stderr once per session |
+| No `[auth]`, and `NOVA_ALLOW_ANONYMOUS=1` in the process environment | The app, under an **Anonymous mode** banner (local development only) |
+
+**Who is allowed** is set in `[access]`:
+
+- `allowed_email_domains` lists exact domains, matched case-insensitively. There are no wildcards and no subdomain matching: `sub.hospital.org` must be listed itself, and `evil-hospital.org` never matches `hospital.org`. It can be a list or a comma-separated string. Empty or missing refuses everyone.
+- The email must be verified: the token's `email_verified` must be true. `unverified_email_providers` names providers whose tokens may leave the claim out (`"default"` is the flat `[auth]` provider). Tokens from any other provider are refused without it.
+- A Google token must also carry a hosted-domain (`hd`) claim that is allowlisted, so a personal Google account registered on a work address is refused.
+
+**Misconfigured** means any of these:
+
+- the secrets file can't be read;
+- `[auth]` has no `redirect_uri` ending in `/oauth2callback`, no random `cookie_secret` of at least 32 characters (the template's placeholder is refused), or an incomplete provider;
+- `[access]` is present without `[auth]`, or lists no valid domain;
+- Authlib is not installed;
+- Streamlit's `server.trustedUserHeaders` is set, since header claims would override sign-in claims;
+- `NOVA_ALLOW_ANONYMOUS` appears in `.env` or `secrets.toml`.
+
+**Identity providers:**
+
+- **Google Workspace** sends `email_verified`, and the `hd` check applies automatically.
+- **Microsoft Entra ID**: use your tenant-specific `server_metadata_url` (never `/common` or `/organizations`), which pins sign-in to your tenant. Entra ID tokens carry no `email_verified`, so list the provider in `unverified_email_providers`.
+- **Okta** may leave `email_verified` out of its "thin" ID tokens (not checked against a live tenant). If sign-ins are denied as unverified, include the claim in the token at Okta. Otherwise list the provider in `unverified_email_providers`, but only if you trust its email addresses.
+
+**Shared workstations.** **Sign out** first clears the session's results, review edits, uploads, recording, and keyterms. It then ends the sign-in and redirects through the provider's own logout, when it has one. Google has none, so the next person could click **Sign in** and pick the previous clinician's still-active Google session. For Entra, Okta, and Auth0, set `client_kwargs = { prompt = "login" }` so the provider asks for credentials on every sign-in. With Google, users must also sign out of Google, and a caption under **Sign out** says so.
+
+**Known limits:**
+
+- **Session length.** Streamlit's identity cookie lasts 30 days and never re-checks the ID token. The app caps a sign-in at 12 hours by the token's `iat` (`MAX_SESSION_AGE_SECONDS`), so someone disabled at the identity provider keeps access for up to 12 hours, or until they sign out.
+- **Media URLs.** Audio players and file downloads are served from unguessable `/media/…` URLs that carry no sign-in or session check. Anyone holding one can fetch it while it exists.
+- **Uploads.** Streamlit's upload endpoint (`/_stcore/upload_file/…`) checks XSRF and the session, not sign-in. A client sitting on the sign-in screen can still push files of up to 200 MB each into server memory. For an internet-facing deployment, set body-size and rate limits on that path at a reverse proxy, or put an auth proxy (oauth2-proxy, IAP) in front of the app.
+- **Outbound traffic.** With sign-in configured, the server contacts the identity provider (its metadata, JWKS, and token endpoints), and the browser is redirected there to sign in and out.
+
 ## Architecture
 
-- **`nova/`** — the framework-free core (no Streamlit imports): `config` (constants), `transcribe` (`build_options` + `transcribe_batch`), `results` (response walkers and low-confidence flagging). Speakers are Deepgram's native 0-based integers here.
-- **`streamlit_app.py`** — the Streamlit UI; a thin adapter over `nova/` that adds widgets, session state, the renderers (which display speakers 1-based), and the review/sign-off gate on Download.
+- **`nova/`** — the framework-free core (no Streamlit imports): `config` (constants), `transcribe` (`build_options` + `transcribe_batch`), `results` (response walkers and low-confidence flagging), `access` (the sign-in policy). Speakers are Deepgram's native 0-based integers here.
+- **`streamlit_app.py`** — the Streamlit UI; a thin adapter over `nova/` that adds the sign-in gate, widgets, session state, the renderers (which display speakers 1-based), and the review/sign-off gate on Download.
 
 ## Testing
 
@@ -107,7 +160,7 @@ uv run ruff format .  # format
 uv run ty check .     # type check
 ```
 
-Tests mock the Deepgram client — no real API calls. The core is tested directly (`tests/test_transcribe.py`, `tests/test_results.py`), the Streamlit adapter in `tests/test_streamlit_app.py`, the dev hooks in `tests/test_hooks.py`, and the project's config — the CI and release workflows, the Dependabot config, and the license — in `tests/test_ci_workflow.py`, `tests/test_release_workflow.py`, `tests/test_dependabot.py`, and `tests/test_license.py`.
+Tests mock the Deepgram client — no real API calls. The core is tested directly (`tests/test_transcribe.py`, `tests/test_results.py`, `tests/test_access.py`), the Streamlit adapter in `tests/test_streamlit_app.py`, the dev hooks in `tests/test_hooks.py`, and the project's config — the CI and release workflows, the Dependabot config, and the license — in `tests/test_ci_workflow.py`, `tests/test_release_workflow.py`, `tests/test_dependabot.py`, and `tests/test_license.py`.
 
 **Continuous integration** — `.github/workflows/ci.yml` (GitHub Actions) runs these same four gates plus `uv sync --locked` across a Python 3.12 + 3.13 matrix on every push to `main`, every pull request, and manual dispatch. It needs no secrets: tests mock Deepgram, so CI never calls the API. The two matrix legs report as the `checks (3.12)` / `checks (3.13)` status checks that `main` requires, so the job id and matrix values are a branch-protection contract — `tests/test_ci_workflow.py` pins them.
 
@@ -129,7 +182,7 @@ Three things worth knowing:
 
 ## Claude Code hooks
 
-The repo ships **Claude Code hooks** in `.claude/` (shared via `settings.json`) that run these checks automatically while you work: they format, lint, and type-check edited Python, block edits to secret files (`.env`, `.streamlit/secrets.toml`), and run the test suite when a turn finishes. Newly added hooks need approval before firing (`/hooks`). Personal overrides go in `.claude/settings.local.json` (gitignored). See CLAUDE.md for the full breakdown.
+The repo ships **Claude Code hooks** in `.claude/` (shared via `settings.json`) that run these checks automatically while you work: they format, lint, and type-check edited Python, block edits to secret files (`.env`, `.streamlit/secrets.toml`; the tracked template `.streamlit/secrets.toml.example` stays editable), and run the test suite when a turn finishes. Newly added hooks need approval before firing (`/hooks`). Personal overrides go in `.claude/settings.local.json` (gitignored). See CLAUDE.md for the full breakdown.
 
 ## License
 

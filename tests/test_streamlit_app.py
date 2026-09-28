@@ -1,9 +1,21 @@
+import inspect
+import logging
 import re
+import time
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
 import streamlit_app
+from nova.access import (
+    PROBLEM_AUTHLIB,
+    PROBLEM_NOT_CONFIGURED,
+    PROBLEM_OPT_OUT_IN_DOTENV,
+    PROBLEM_SECRETS_UNPARSEABLE,
+    PROBLEM_TRUSTED_HEADERS,
+    Decision,
+)
+from nova.config import ALLOW_ANONYMOUS_ENV
 from tests.helpers import RUN_ID, mock_upload, mock_word, wav_bytes
 
 FAKE_AUDIO = b"fake-audio-data"
@@ -839,7 +851,10 @@ class TestReviewControls:
 
         streamlit_app._on_review(RUN_ID, 0)
 
-        assert mock_st.session_state == {f"reviewed_{RUN_ID}_0": True}
+        assert mock_st.session_state == {
+            "access_ok": True,
+            f"reviewed_{RUN_ID}_0": True,
+        }
 
     def test_edit_help_explains_export_apply_and_unlock(self):
         assert "Download saves" in streamlit_app.EDIT_HELP
@@ -1118,17 +1133,472 @@ class TestSecretApiKey:
             assert streamlit_app._secret_api_key() == ""
 
 
+AUTH = {
+    "redirect_uri": "http://localhost:8501/oauth2callback",
+    "cookie_secret": "test-cookie-secret-0123456789abcdef",
+    "client_id": "id",
+    "client_secret": "secret",
+    "server_metadata_url": "https://idp.example/.well-known/openid-configuration",
+}
+ACCESS = {"allowed_email_domains": ["hospital.org"]}
+
+
+def _signed_in(email="dr@hospital.org", **overrides):
+    """Claims as Streamlit stores them after a default-provider sign-in."""
+    return {
+        "is_logged_in": True,
+        "email": email,
+        "email_verified": True,
+        "sub": "abc",
+        "provider": "default",
+        "iat": time.time() - 60,
+        **overrides,
+    }
+
+
+class TestAccessGate:
+    """`_access_gate` renders nova.access's decision (the policy itself is tested in
+    test_access.py). Its Streamlit inputs — secrets, claims, config — are mocked, and
+    the `.env` / Authlib probes are patched, so no developer file can steer it."""
+
+    @pytest.fixture
+    def secrets(self, mock_st, monkeypatch):
+        # A developer's shell (or .env via load_dotenv) may set the opt-out.
+        monkeypatch.delenv(ALLOW_ANONYMOUS_ENV, raising=False)
+        # Required: a MagicMock option value is truthy, so it would read as trusted
+        # user headers being configured.
+        mock_st.get_option.return_value = {}
+        mock_st.user.to_dict.return_value = {}
+        data: dict = {}
+        mock_st.secrets.get.side_effect = lambda key, default=None: data.get(
+            key, default
+        )
+        with (
+            patch.object(streamlit_app, "_authlib_installed", return_value=True),
+            patch.object(streamlit_app, "_dotenv_has_opt_out", return_value=False),
+        ):
+            yield data
+
+    @pytest.fixture
+    def configured(self, secrets):
+        secrets.update({"auth": dict(AUTH), "access": dict(ACCESS)})
+        return secrets
+
+    @staticmethod
+    def _buttons(mock_st):
+        return [(c.args[0], c.kwargs) for c in mock_st.button.call_args_list]
+
+    def test_not_configured_shows_only_a_generic_error(self, mock_st, secrets, caplog):
+        with caplog.at_level(logging.ERROR, logger="nova.access"):
+            decision = streamlit_app._access_gate()
+
+        assert decision is None
+        mock_st.error.assert_called_once_with(
+            streamlit_app.SIGN_IN_UNAVAILABLE, icon=":material/error:"
+        )
+        mock_st.button.assert_not_called()
+        assert mock_st.session_state["access_ok"] is False
+        # The visitor sees no configuration detail; the operator gets it on stderr.
+        assert PROBLEM_NOT_CONFIGURED not in repr(mock_st.mock_calls)
+        assert [r.getMessage() for r in caplog.records] == [
+            f"Sign-in is unavailable: {PROBLEM_NOT_CONFIGURED}"
+        ]
+
+    def test_problem_is_logged_once_per_session(self, mock_st, secrets, caplog):
+        with caplog.at_level(logging.ERROR, logger="nova.access"):
+            streamlit_app._access_gate()
+            streamlit_app._access_gate()
+
+        assert len(caplog.records) == 1
+        assert mock_st.error.call_count == 2  # but the visitor sees it every run
+
+    def test_anonymous_opt_out_shows_the_banner(self, mock_st, secrets, monkeypatch):
+        monkeypatch.setenv(ALLOW_ANONYMOUS_ENV, "1")
+
+        decision = streamlit_app._access_gate()
+
+        assert decision == Decision("anonymous")
+        mock_st.warning.assert_called_once_with(
+            streamlit_app.ANONYMOUS_MODE, icon=":material/no_accounts:"
+        )
+        mock_st.error.assert_not_called()
+        assert mock_st.session_state["access_ok"] is True
+        assert ALLOW_ANONYMOUS_ENV in streamlit_app.ANONYMOUS_MODE
+
+    def test_no_secrets_file_is_treated_as_missing(self, mock_st, secrets, monkeypatch):
+        monkeypatch.setenv(ALLOW_ANONYMOUS_ENV, "1")
+        mock_st.secrets.get.side_effect = streamlit_app.StreamlitSecretNotFoundError(
+            "none", error_id="no-secrets-found"
+        )
+
+        assert streamlit_app._access_gate() == Decision("anonymous")
+
+    def test_unreadable_secrets_block_even_with_the_opt_out(
+        self, mock_st, secrets, monkeypatch, caplog
+    ):
+        monkeypatch.setenv(ALLOW_ANONYMOUS_ENV, "1")
+        mock_st.secrets.get.side_effect = streamlit_app.StreamlitSecretNotFoundError(
+            "bad", error_id="failed-parsing-secrets-file"
+        )
+
+        with caplog.at_level(logging.ERROR, logger="nova.access"):
+            decision = streamlit_app._access_gate()
+
+        assert decision is None
+        mock_st.error.assert_called_once()
+        mock_st.warning.assert_not_called()
+        assert PROBLEM_SECRETS_UNPARSEABLE in caplog.text
+
+    def test_opt_out_in_dotenv_blocks_even_with_sign_in_configured(
+        self, mock_st, configured, monkeypatch, caplog
+    ):
+        monkeypatch.setenv(ALLOW_ANONYMOUS_ENV, "1")
+        mock_st.user.to_dict.return_value = _signed_in()
+
+        with (
+            patch.object(streamlit_app, "_dotenv_has_opt_out", return_value=True),
+            caplog.at_level(logging.ERROR, logger="nova.access"),
+        ):
+            decision = streamlit_app._access_gate()
+
+        assert decision is None
+        assert PROBLEM_OPT_OUT_IN_DOTENV in caplog.text
+        assert mock_st.session_state["access_ok"] is False
+
+    def test_missing_authlib_blocks(self, mock_st, configured, caplog):
+        with (
+            patch.object(streamlit_app, "_authlib_installed", return_value=False),
+            caplog.at_level(logging.ERROR, logger="nova.access"),
+        ):
+            decision = streamlit_app._access_gate()
+
+        assert decision is None
+        mock_st.error.assert_called_once_with(
+            streamlit_app.SIGN_IN_UNAVAILABLE, icon=":material/error:"
+        )
+        assert PROBLEM_AUTHLIB in caplog.text
+
+    def test_trusted_user_headers_block(self, mock_st, configured, caplog):
+        mock_st.get_option.return_value = {"X-Forwarded-Email": "email"}
+
+        with caplog.at_level(logging.ERROR, logger="nova.access"):
+            assert streamlit_app._access_gate() is None
+
+        mock_st.get_option.assert_called_with("server.trustedUserHeaders")
+        assert PROBLEM_TRUSTED_HEADERS in caplog.text
+
+    @pytest.mark.parametrize(
+        "claims",
+        [
+            {},
+            {"is_logged_in": False},  # production's logged-out shape with [auth] set
+            {"email": "test@example.com"},  # AppTest's injected email alone
+        ],
+    )
+    def test_logged_out_offers_sign_in(self, mock_st, configured, claims):
+        mock_st.user.to_dict.return_value = claims
+
+        decision = streamlit_app._access_gate()
+
+        assert decision is None
+        mock_st.info.assert_called_once_with(
+            streamlit_app.SIGN_IN_PROMPT, icon=":material/lock:"
+        )
+        ((label, kwargs),) = self._buttons(mock_st)
+        assert label == "Sign in"
+        # st.login runs only as the click callback, never on render.
+        assert kwargs["on_click"] is mock_st.login
+        assert kwargs["args"] == (None,)
+        assert kwargs["key"] == "sign_in_default"
+        assert kwargs["icon"] == ":material/login:"
+        assert "type" not in kwargs  # secondary: Run stays the only primary button
+        mock_st.login.assert_not_called()
+        assert mock_st.session_state["access_ok"] is False
+
+    def test_one_button_per_named_provider(self, mock_st, configured):
+        auth = {k: v for k, v in AUTH.items() if k in ("redirect_uri", "cookie_secret")}
+        provider = {
+            k: AUTH[k] for k in ("client_id", "client_secret", "server_metadata_url")
+        }
+        configured["auth"] = {**auth, "google": provider, "microsoft": provider}
+
+        streamlit_app._access_gate()
+
+        buttons = self._buttons(mock_st)
+        assert [label for label, _ in buttons] == [
+            "Sign in with Google",
+            "Sign in with Microsoft",
+        ]
+        assert [kw["args"] for _, kw in buttons] == [("google",), ("microsoft",)]
+        assert [kw["key"] for _, kw in buttons] == [
+            "sign_in_google",
+            "sign_in_microsoft",
+        ]
+
+    def test_stale_sign_in_asks_to_sign_in_again(self, mock_st, configured):
+        mock_st.user.to_dict.return_value = _signed_in(iat=time.time() - 13 * 3600)
+
+        assert streamlit_app._access_gate() is None
+
+        mock_st.info.assert_called_once_with(
+            streamlit_app.SESSION_EXPIRED, icon=":material/lock:"
+        )
+        assert [label for label, _ in self._buttons(mock_st)] == ["Sign in"]
+
+    def test_allowed_continues(self, mock_st, configured):
+        mock_st.user.to_dict.return_value = _signed_in("Dr@Hospital.org")
+
+        decision = streamlit_app._access_gate()
+
+        assert decision is not None
+        assert (decision.kind, decision.email) == ("allow", "dr@hospital.org")
+        mock_st.error.assert_not_called()
+        mock_st.info.assert_not_called()
+        mock_st.warning.assert_not_called()
+        assert mock_st.session_state["access_ok"] is True
+
+    def test_denied_names_the_escaped_email_and_offers_sign_out(
+        self, mock_st, configured
+    ):
+        mock_st.user.to_dict.return_value = _signed_in("dr_x@evil-hospital.org")
+
+        assert streamlit_app._access_gate() is None
+
+        mock_st.error.assert_called_once_with(
+            "dr\\_x@evil-hospital.org is not authorized to use this app."
+            + streamlit_app.DENY_SUFFIX,
+            icon=":material/error:",
+        )
+        ((label, kwargs),) = self._buttons(mock_st)
+        assert label == "Sign out"
+        assert kwargs["on_click"] is streamlit_app._sign_out
+        assert mock_st.session_state["access_ok"] is False
+
+    def test_unverified_email_message(self, mock_st, configured):
+        mock_st.user.to_dict.return_value = _signed_in(email_verified=False)
+
+        streamlit_app._access_gate()
+
+        assert "isn't a verified email address" in mock_st.error.call_args.args[0]
+
+    def test_every_deny_reason_has_a_message(self):
+        for reason in ("email_missing", "email_unverified", "domain_not_allowed"):
+            assert streamlit_app.DENY_MESSAGES[reason]
+
+
+class TestAccessInputs:
+    """The gate's probes of secrets, `.env`, and Authlib."""
+
+    def test_snapshot_reads_auth_access_and_the_opt_out(self, mock_st):
+        data = {"auth": AUTH, "access": ACCESS, ALLOW_ANONYMOUS_ENV: "1"}
+        mock_st.secrets.get.side_effect = lambda key, default=None: data.get(
+            key, default
+        )
+
+        snapshot = streamlit_app._secrets_snapshot()
+
+        assert snapshot.state == "ok"
+        assert (snapshot.auth, snapshot.access) == (AUTH, ACCESS)
+        assert snapshot.anonymous_opt_out_present is True
+
+    @pytest.mark.parametrize(
+        ("error_id", "state"),
+        [
+            ("no-secrets-found", "missing"),
+            ("failed-parsing-secrets-file", "malformed"),
+            ("invalid-secrets-path", "malformed"),
+            (None, "malformed"),
+        ],
+    )
+    def test_snapshot_classifies_read_failures(self, mock_st, error_id, state):
+        mock_st.secrets.get.side_effect = streamlit_app.StreamlitSecretNotFoundError(
+            "x", error_id=error_id
+        )
+
+        assert streamlit_app._secrets_snapshot().state == state
+
+    @pytest.mark.parametrize(
+        ("values", "expected"),
+        [
+            ({}, False),
+            ({"DEEPGRAM_API_KEY": "k"}, False),
+            ({ALLOW_ANONYMOUS_ENV: "1"}, True),
+            ({ALLOW_ANONYMOUS_ENV: "0"}, True),  # any mention in .env blocks
+            ({ALLOW_ANONYMOUS_ENV: None}, True),
+        ],
+    )
+    def test_dotenv_opt_out_probe(self, values, expected):
+        with patch.object(streamlit_app, "dotenv_values", return_value=values):
+            assert streamlit_app._dotenv_has_opt_out() is expected
+
+    def test_authlib_probe(self):
+        assert streamlit_app._authlib_installed() is True  # the streamlit[auth] extra
+        with patch.object(streamlit_app.importlib.util, "find_spec", return_value=None):
+            assert streamlit_app._authlib_installed() is False
+
+
+class TestSignOut:
+    """The sidebar account block, Sign out, and the PHI purge behind it."""
+
+    def test_account_panel_escapes_the_email(self, mock_st):
+        streamlit_app._account_panel("dr_smith@hospital.org")
+
+        assert mock_st.caption.call_args_list[0].args == (
+            ":material/account_circle: Signed in as dr\\_smith@hospital.org",
+        )
+        mock_st.button.assert_called_once_with(
+            "Sign out",
+            key="sign_out",
+            icon=":material/logout:",
+            on_click=streamlit_app._sign_out,
+        )
+        # The shared-workstation caveat sits under the button.
+        assert mock_st.caption.call_args_list[-1].args == (streamlit_app.SIGN_OUT_NOTE,)
+
+    def test_sign_out_purges_phi_then_logs_out(self, mock_st):
+        mock_st.session_state.update(
+            {
+                "responses": [("a.wav", MagicMock())],
+                "audio_sources": [b"a"],
+                "run_id": RUN_ID,
+                "keyterms": ["Jane Doe"],
+                f"transcript_{RUN_ID}_0": "Patient text.",
+                f"reviewed_{RUN_ID}_0": True,
+                "uploads_0": [MagicMock()],
+                "recording_0": MagicMock(),
+                "language": "en-GB",  # a setting, not PHI: kept
+                "input_nonce": 0,
+            }
+        )
+
+        streamlit_app._sign_out()
+
+        assert mock_st.session_state == {
+            "language": "en-GB",
+            "input_nonce": 1,
+            "access_ok": False,
+        }
+        mock_st.logout.assert_called_once_with()
+
+    def test_nonce_starts_from_zero(self, mock_st):
+        streamlit_app._purge_session()
+
+        assert mock_st.session_state["input_nonce"] == 1
+
+    def test_logout_runs_even_if_the_purge_fails(self, mock_st):
+        with (
+            patch.object(
+                streamlit_app, "_purge_session", side_effect=RuntimeError("boom")
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            streamlit_app._sign_out()
+
+        mock_st.logout.assert_called_once_with()
+
+
+class TestAccessRecheck:
+    """The output fragment and review callbacks rerun without passing through the
+    gate, so they re-check `access_ok` themselves."""
+
+    @staticmethod
+    def _render_output():
+        # Unwrap st.fragment, which returns without calling the body in bare mode.
+        inspect.unwrap(streamlit_app._render_output)()
+
+    def test_output_renders_nothing_without_access(self, mock_st):
+        mock_st.session_state.update(
+            {"access_ok": False, "responses": [("a.wav", MagicMock())]}
+        )
+
+        self._render_output()
+
+        assert mock_st.mock_calls == []
+
+    @pytest.mark.parametrize("flag", [None, "true", 1])
+    def test_access_flag_is_checked_by_identity(self, mock_st, flag):
+        mock_st.session_state["access_ok"] = flag
+
+        self._render_output()
+
+        assert mock_st.mock_calls == []
+
+    def test_output_renders_with_access(self, mock_st):
+        self._render_output()
+
+        mock_st.caption.assert_any_call(":material/description: Transcript")
+
+    def test_on_edit_does_nothing_without_access(self, mock_st):
+        mock_st.session_state.update({"access_ok": False, f"reviewed_{RUN_ID}_0": True})
+
+        streamlit_app._on_edit(RUN_ID, 0)
+
+        assert mock_st.session_state[f"reviewed_{RUN_ID}_0"] is True
+
+
+class TestBareImport:
+    """`import streamlit_app` runs the module-level access gate in bare mode, where
+    `st.stop()` is a no-op, so everything after the gate must tolerate either
+    outcome. The root conftest pins this process to one branch (opt-out "0", no
+    secrets); these subprocesses exercise both, so every machine covers both."""
+
+    @pytest.mark.parametrize(
+        ("opt_out", "expected"), [("1", "anonymous"), (None, "None")]
+    )
+    def test_import_survives_either_gate_outcome(self, opt_out, expected):
+        import os
+        import subprocess
+        import sys
+
+        root = os.path.dirname(os.path.dirname(__file__))
+        code = """
+import dotenv
+from streamlit import config
+
+dotenv.load_dotenv = lambda *a, **k: False
+dotenv.dotenv_values = lambda *a, **k: {}
+config.set_option("secrets.files", [])
+
+import streamlit_app
+
+decision = streamlit_app.access_decision
+print(decision.kind if decision is not None else None)
+"""
+        env = {k: v for k, v in os.environ.items() if k != ALLOW_ANONYMOUS_ENV}
+        if opt_out is not None:
+            env[ALLOW_ANONYMOUS_ENV] = opt_out
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip().splitlines()[-1] == expected
+
+
 class TestAppSmoke:
     """Run the whole script under a real Streamlit runtime (not the mock).
 
-    Catches the class of errors the whole-module ``mock_st`` MagicMock cannot.
-    Four runs (a known key is seeded for the first three so they don't depend on a
-    local ``.env``):
+    Catches the class of errors the whole-module ``mock_st`` MagicMock cannot. Every
+    run is hermetic: a known API key and the anonymous opt-out are set, ``.env`` is
+    never read (``load_dotenv`` / ``dotenv_values`` no-op'd), and ``secrets.files``
+    is empty, so neither a local ``.env`` nor a developer's
+    ``~/.streamlit/secrets.toml`` can change an outcome. Sign-in is configured per
+    run through ``at.secrets``, and a signed-in user is simulated by patching
+    ``streamlit.user_info._get_user_info`` (private, but stable while streamlit is
+    ``==``-pinned; a rename fails loudly). AppTest cannot produce production's
+    logged-out shape, ``{"is_logged_in": False}`` — ``at.secrets`` is invisible to
+    Streamlit's own ``[auth]`` probe — so that case is covered by the mocked
+    TestAccessGate. Eight runs:
 
-    - **empty state** — module load (``set_page_config`` ordering, the ``st.form``
-      structure, the output fragment) plus the idle UI: the placeholder caption, a
-      disabled Run button, no review controls or download row, the inputs | output
-      column split, and the Features control order
+    - **empty state (anonymous)** — module load (``set_page_config`` ordering, the
+      ``st.form`` structure, the output fragment) plus the idle UI: the one
+      anonymous-mode banner, the placeholder caption, a disabled Run button, no
+      review controls or download row, the inputs | output column split, and the
+      Features control order
       (``language, keyterms, smart_format, diarize, dictation, measurements, redact``).
     - **seeded diarized** — renders the transcript panel for a diarized result,
       asserting the exact 1-based color-directive speaker lines, the
@@ -1144,8 +1614,19 @@ class TestAppSmoke:
     - **seeded flat** — the non-diarized render branch: an escaped transcript with
       no speaker labels, its one low-confidence word in bold orange under the legend
       caption, and a plain-text editor seed.
+    - **sign-in required** — ``[auth]`` configured, nobody signed in (AppTest's
+      injected ``test@example.com`` has no ``is_logged_in``): only the Sign in button
+      and prompt render — no inputs, no output, no Run — and the opt-out is ignored.
+    - **signed in, allowed** — the app renders with the account block in the
+      sidebar; then **Sign out** purges the session's results, review state, and
+      inputs (rotating ``input_nonce``) and stops at the sign-in screen.
+    - **signed in, denied** — an email outside the allowlist: the refusal and a
+      Sign out button, nothing else.
     - **no-key state** — clears ``DEEPGRAM_API_KEY`` so the key-required warning and
       the API-Key input render.
+    - **not configured** — no ``[auth]`` and no opt-out: only the generic
+      "Sign-in is unavailable" error; the operator's reason goes to stderr, which
+      the parent asserts.
 
     No Deepgram call happens — nothing clicks Run — so it never touches the network;
     the toast/per-item status icons fire only on a real batch and are not exercised.
@@ -1166,7 +1647,11 @@ class TestAppSmoke:
         code = """
 import os
 import sys
-from unittest.mock import MagicMock
+import time
+from unittest.mock import MagicMock, patch
+
+import dotenv
+from streamlit import config
 from streamlit.runtime.media_file_manager import MediaFileManager
 from streamlit.testing.v1 import AppTest
 from streamlit.testing.v1.element_tree import Block
@@ -1176,9 +1661,46 @@ from tests.helpers import RUN_ID
 
 app = sys.argv[1]
 
-# Seed a key so the first three runs are deterministic regardless of a local .env
-# (load_dotenv does not override an already-set var); run #4 clears it.
+# Hermetic for every run: a known key and the anonymous opt-out (so the first runs
+# need no sign-in); .env is never read (each run re-executes the app's
+# `from dotenv import ...`, picking these up); and no secrets file. Later runs
+# configure sign-in via at.secrets, or clear the key / the opt-out.
 os.environ["DEEPGRAM_API_KEY"] = "test-key"
+os.environ["NOVA_ALLOW_ANONYMOUS"] = "1"
+dotenv.load_dotenv = lambda *a, **k: False
+dotenv.dotenv_values = lambda *a, **k: {}
+config.set_option("secrets.files", [])
+
+AUTH = {
+    "redirect_uri": "http://localhost:8501/oauth2callback",
+    "cookie_secret": "apptest-cookie-secret-0123456789abcdef",
+    "client_id": "id",
+    "client_secret": "secret",
+    "server_metadata_url": "https://idp.example/.well-known/openid-configuration",
+}
+
+
+def _authed():
+    # Sign-in configured through the app's own st.secrets read.
+    at = AppTest.from_file(app, default_timeout=30)
+    at.secrets["auth"] = AUTH
+    at.secrets["access"] = {"allowed_email_domains": ["hospital.org"]}
+    return at
+
+
+def _signed_in_as(email):
+    # Claims as Streamlit stores them after a default-provider sign-in.
+    return patch(
+        "streamlit.user_info._get_user_info",
+        return_value={
+            "is_logged_in": True,
+            "email": email,
+            "email_verified": True,
+            "sub": "abc",
+            "provider": "default",
+            "iat": int(time.time()),
+        },
+    )
 
 # AppTest never executes a download button's deferred `data` callable (only the
 # browser's click path does), so record each one as Streamlit registers it; a test
@@ -1238,17 +1760,20 @@ def _widget_keys_in_order(node, acc):
         _widget_keys_in_order(child, acc)
 
 
-# 1) Empty state — module load (set_page_config / form / output fragment) plus the
-#    idle UI: the placeholder caption and a Run button disabled with no input selected.
+# 1) Empty state (anonymous) — module load (set_page_config / form / output fragment)
+#    plus the idle UI: the placeholder caption and a Run button disabled with no input
+#    selected.
 at = AppTest.from_file(app, default_timeout=30).run()
 assert not at.exception, at.exception
 assert at.title[0].value == "Deepgram Medical Transcription"
 assert any("Select audio, then click Run" in c.value for c in at.caption), [c.value for c in at.caption]
 run = [b for b in at.button if b.label == "Run"]
 assert run and run[0].disabled, "Run should be disabled with no audio input"
-# Key was seeded, so no api-key warning fires — this pins the disable to the
-# no-input branch (`not has_input`), not the no-key branch (`not api_key`).
-assert not at.warning, [w.value for w in at.warning]
+# The one warning is the anonymous-mode banner. The key was seeded, so no api-key
+# warning fires — this pins the disable to the no-input branch (`not has_input`),
+# not the no-key branch (`not api_key`).
+assert [w.value for w in at.warning] and len(at.warning) == 1, [w.value for w in at.warning]
+assert "NOVA_ALLOW_ANONYMOUS" in at.warning[0].value, at.warning[0].value
 # No results, so no review controls and no download row.
 assert not at.text_area and not at.checkbox and not at.download_button
 
@@ -1387,19 +1912,77 @@ assert [m.value for m in flat_at.metric][-1] == "1"
 # The editor holds the plain text — no flag markup reaches what gets exported.
 assert flat_at.text_area[0].value == "Patient is stable."
 
-# 4) No-key state — clear the key, no-op load_dotenv, and empty the secrets search
-#    path, so neither a local .env nor a developer's ~/.streamlit/secrets.toml can
-#    repopulate it; the key-required warning + API-key input must render.
-import dotenv
-from streamlit import config
+# 4) Sign-in required — [auth] configured and nobody signed in (AppTest's injected
+#    {"email": "test@example.com"} has no is_logged_in, which never admits anyone):
+#    only the prompt and the Sign in button render. The opt-out is still set, and
+#    ignored now that [auth] exists. Nothing clicks Sign in: st.login would validate
+#    against the real secrets file, which at.secrets does not reach.
+login = _authed().run()
+assert not login.exception, login.exception
+assert [b.label for b in login.button] == ["Sign in"], [b.label for b in login.button]
+assert any("Sign in" in i.value for i in login.info), [i.value for i in login.info]
+assert not login.main.columns  # stopped at the gate: no inputs, no output, no Run
+assert not login.warning, [w.value for w in login.warning]
 
-dotenv.load_dotenv = lambda *a, **k: False
-config.set_option("secrets.files", [])
+# 5) Signed in and allowed — the app renders, with the account block in the sidebar.
+diar_signed = _resp("Hello. Hi.", [_word("Hello.", 0), _word("Hi.", 1)], 3.5, 0.95)
+with _signed_in_as("Dr@Hospital.org"):
+    signed = _authed()
+    signed.session_state["responses"] = [("sample.wav", diar_signed)]
+    signed.session_state["audio_sources"] = [None]
+    signed.session_state["run_id"] = RUN_ID
+    signed.run()
+assert not signed.exception, signed.exception
+assert any(b.label == "Run" for b in signed.button), [b.label for b in signed.button]
+assert any("dr@hospital.org" in c.value for c in signed.sidebar.caption), [c.value for c in signed.sidebar.caption]
+assert [b.label for b in signed.sidebar.button if b.label == "Sign out"] == ["Sign out"]
+assert not signed.warning, [w.value for w in signed.warning]
+assert signed.text_area and signed.checkbox  # results render for a signed-in session
+
+# Sign out: the callback purges the session's PHI, then st.logout() clears the
+# sign-in, so the same rerun stops at the sign-in screen.
+signed.button(key="sign_out").click().run()
+assert not signed.exception, signed.exception
+assert [b.label for b in signed.button] == ["Sign in"], [b.label for b in signed.button]
+for key in (
+    "responses",
+    "audio_sources",
+    "run_id",
+    "transcript_" + RUN_ID + "_0",
+    "reviewed_" + RUN_ID + "_0",
+    "uploads_0",
+    "recording_0",
+):
+    assert key not in signed.session_state, key
+assert signed.session_state["input_nonce"] == 1
+assert signed.session_state["access_ok"] is False
+
+# 6) Signed in but denied — an email outside the allowlist sees the refusal and a
+#    Sign out button, nothing else.
+with _signed_in_as("dr@evil-hospital.org"):
+    denied = _authed().run()
+assert not denied.exception, denied.exception
+assert any("not authorized" in e.value for e in denied.error), [e.value for e in denied.error]
+assert [b.label for b in denied.button] == ["Sign out"], [b.label for b in denied.button]
+assert not denied.main.columns
+
+# 7) No-key state — clear the key (.env is never read, so nothing repopulates it);
+#    the key-required warning + API-key input must render (under the anonymous banner).
 os.environ.pop("DEEPGRAM_API_KEY", None)
 nokey = AppTest.from_file(app, default_timeout=30).run()
 assert not nokey.exception, nokey.exception
 assert any("API key required" in w.value for w in nokey.warning), [w.value for w in nokey.warning]
 assert nokey.text_input  # the API-Key password input renders when the key is missing
+
+# 8) Not configured — no [auth] and no opt-out: visitors see only the generic error
+#    (the operator's reason is logged to stderr, asserted by the parent), and nothing
+#    past the gate renders.
+os.environ.pop("NOVA_ALLOW_ANONYMOUS", None)
+closed = AppTest.from_file(app, default_timeout=30).run()
+assert not closed.exception, closed.exception
+assert [e.value for e in closed.error] == ["Sign-in is unavailable. Contact your administrator."], [e.value for e in closed.error]
+assert not closed.button and not closed.text_input and not closed.warning
+assert not closed.main.columns
 """
         result = subprocess.run(
             [sys.executable, "-c", code, app],
@@ -1409,3 +1992,7 @@ assert nokey.text_input  # the API-Key password input renders when the key is mi
         )
 
         assert result.returncode == 0, result.stderr
+        # Run 8's reason reached the operator: nova.access's logger writes to stderr.
+        assert f"Sign-in is unavailable: {PROBLEM_NOT_CONFIGURED}" in result.stderr
+        # A refused account's email is shown to that user, never logged.
+        assert "evil-hospital" not in result.stderr + result.stdout

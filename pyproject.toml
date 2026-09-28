@@ -12,9 +12,10 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
+    "authlib==1.8.0",
     "deepgram-sdk==7.10.0",
     "python-dotenv==1.2.3",
-    "streamlit==1.64.0",
+    "streamlit[auth]==1.64.0",
 ]
 
 [dependency-groups]

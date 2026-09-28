@@ -78,6 +78,7 @@ class TestBlockSecrets:
             ".ENV",  # case-insensitive: same inode as .env on a case-insensitive FS
             ".Env",
             ".streamlit/SECRETS.TOML",
+            ".streamlit/example.secrets.toml",  # *.secrets.toml — so never a template name
             ".secrets.toml",  # Dynaconf secrets file
             "secrets.toml",  # bare secrets.toml under the root (nested match)
             ".envrc",  # direnv
@@ -104,6 +105,7 @@ class TestBlockSecrets:
             "nova/config.py",
             "README.md",
             ".streamlit/config.toml",  # non-secret toml must stay editable
+            ".streamlit/secrets.toml.example",  # tracked sign-in template
         ],
     )
     def test_allows_non_secret_files(self, relpath):

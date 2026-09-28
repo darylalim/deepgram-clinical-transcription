@@ -1,6 +1,8 @@
+import importlib.util
 import io
 import os
 import re
+import time
 import uuid
 import wave
 from collections.abc import Callable
@@ -9,10 +11,18 @@ from typing import Any
 
 import streamlit as st
 from deepgram import DeepgramClient
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from streamlit.errors import StreamlitSecretNotFoundError
 
+from nova.access import (
+    Decision,
+    SecretsSnapshot,
+    anonymous_opt_out,
+    decide_access,
+    report_problem,
+)
 from nova.config import (
+    ALLOW_ANONYMOUS_ENV,
     AUDIO_EXTENSIONS as _AUDIO_EXTENSIONS,
     DEFAULT_DIARIZE,
     DEFAULT_DICTATION,
@@ -53,7 +63,10 @@ MAX_PLAYBACK_BYTES = 25 * 1024 * 1024  # larger uploads skip inline playback (me
 # fold. Streamlit has no viewport-relative height, so a fixed value is the only option.
 # The review editor and Reviewed checkbox render inside the panel's scroll container,
 # so they add nothing above it (a long transcript then scrolls through twice: the
-# highlighted view, then the editor).
+# highlighted view, then the editor). Signed in, the account block sits in the
+# sidebar, so it adds nothing above the panel either; only the local-development
+# anonymous-mode banner pushes the main area down (one callout, ~60px), exactly as
+# the "API key required" warning does.
 OUTPUT_HEIGHT = 480
 INPUT_OUTPUT_RATIO = (2, 3)  # main-area column widths: audio inputs | output panel
 
@@ -108,6 +121,155 @@ def _secret_api_key() -> str:
     except StreamlitSecretNotFoundError:
         return ""
     return value if isinstance(value, str) else ""
+
+
+# Sign-in / access control. The policy is decided in nova.access; these helpers read
+# its inputs (secrets, claims, environment) and render the outcome.
+def _secrets_snapshot() -> SecretsSnapshot:
+    """Read [auth] / [access] / the opt-out's presence from `st.secrets`, guarded.
+
+    Read through the public `st.secrets` (so AppTest's `at.secrets` drives it). No
+    secrets file at all is "missing"; any other read failure (a TOML syntax error, a
+    bad path) is "malformed", which the gate treats as fail-closed.
+    """
+    try:
+        return SecretsSnapshot(
+            "ok",
+            auth=st.secrets.get("auth"),
+            access=st.secrets.get("access"),
+            anonymous_opt_out_present=st.secrets.get(ALLOW_ANONYMOUS_ENV) is not None,
+        )
+    except StreamlitSecretNotFoundError as exc:
+        missing = getattr(exc, "error_id", None) == "no-secrets-found"
+        return SecretsSnapshot("missing" if missing else "malformed")
+
+
+def _authlib_installed() -> bool:
+    """Whether Authlib (the streamlit[auth] extra) is importable; a test seam."""
+    return importlib.util.find_spec("authlib") is not None
+
+
+def _dotenv_has_opt_out() -> bool:
+    """Whether `.env` sets the anonymous opt-out (a test seam).
+
+    `load_dotenv` copies `.env` into `os.environ`, so without this check a dev `.env`
+    copied onto a host would switch sign-in off. The gate blocks instead: the opt-out
+    must come from the real process environment.
+    """
+    return ALLOW_ANONYMOUS_ENV in dotenv_values()
+
+
+def _sign_in_label(provider: str | None) -> str:
+    """The button label: "Sign in" (default provider) or "Sign in with <Name>"."""
+    if provider is None:
+        return "Sign in"
+    return f"Sign in with {_escape_markdown(provider.capitalize())}"
+
+
+def _deny_message(decision: Decision) -> str:
+    """The denied visitor's error: why, naming their (escaped) email, then what to do."""
+    email = _escape_markdown(decision.email) if decision.email else "This account"
+    fallback = DENY_MESSAGES["domain_not_allowed"]
+    template = DENY_MESSAGES.get(decision.reason or "", fallback)
+    return template.format(email=email) + DENY_SUFFIX
+
+
+def _access_gate() -> Decision | None:
+    """Decide who may use the app, render the outcome, and return the Decision.
+
+    Returns the Decision when the app may continue (signed in and allowed, or
+    anonymous local development), else None after rendering the refusal — the
+    caller then calls `st.stop()`. `access_ok` is rewritten on every full run (False
+    before any stop), and the output fragment and review callbacks check it, since
+    they rerun without passing through here. `st.login` is only ever a button
+    callback, never called on render.
+    """
+    decision = decide_access(
+        _secrets_snapshot(),
+        claims=st.user.to_dict(),
+        allow_anonymous=anonymous_opt_out(os.environ),
+        opt_out_in_dotenv=_dotenv_has_opt_out(),
+        trusted_headers=bool(st.get_option("server.trustedUserHeaders")),
+        authlib_installed=_authlib_installed(),
+        now=time.time(),
+    )
+    allowed = decision.kind in ("allow", "anonymous")
+    st.session_state["access_ok"] = allowed
+
+    if decision.kind == "anonymous":
+        st.warning(ANONYMOUS_MODE, icon=":material/no_accounts:")
+    elif decision.kind == "blocked":
+        # Visitors see no configuration detail; the operator gets the problem (key
+        # names only) on stderr, once per session rather than on every rerun.
+        problem = decision.problem or ""
+        if st.session_state.get("access_problem_logged") != problem:
+            report_problem(problem)
+            st.session_state["access_problem_logged"] = problem
+        st.error(SIGN_IN_UNAVAILABLE, icon=_ICON_ERROR)
+    elif decision.kind == "login":
+        st.info(
+            SESSION_EXPIRED if decision.reauth else SIGN_IN_PROMPT,
+            icon=":material/lock:",
+        )
+        for provider in decision.providers:
+            st.button(
+                _sign_in_label(provider),
+                key=f"sign_in_{provider or 'default'}",
+                icon=":material/login:",
+                on_click=st.login,
+                args=(provider,),
+            )
+    elif decision.kind == "deny":
+        st.error(_deny_message(decision), icon=_ICON_ERROR)
+        _sign_out_button()
+    return decision if allowed else None
+
+
+# Session-state keys holding PHI (or keyed to it) that sign-out removes.
+_PURGED_KEYS = frozenset({"responses", "audio_sources", "run_id", "keyterms"})
+_PURGED_PREFIXES = ("transcript_", "reviewed_", "uploads_", "recording_")
+
+
+def _purge_session() -> None:
+    """Drop this session's PHI: results, review state, inputs, and keyterms.
+
+    Deletes the keys outright — the sign-out rerun stops at the gate, and Streamlit
+    purges an unrendered widget's state only after a run that completes — then
+    rotates `input_nonce` so the uploader and recorder come back as new, empty
+    widgets, and clears `access_ok` so nothing renders before the gate runs again.
+    """
+    for key in list(st.session_state):
+        if isinstance(key, str) and (
+            key in _PURGED_KEYS or key.startswith(_PURGED_PREFIXES)
+        ):
+            del st.session_state[key]
+    st.session_state["input_nonce"] = st.session_state.get("input_nonce", 0) + 1
+    st.session_state["access_ok"] = False
+
+
+def _sign_out() -> None:
+    """Sign-out button callback: purge this session's PHI, then end the sign-in.
+
+    `st.logout` runs even if the purge fails — signing out must never depend on
+    anything else. It clears `st.user` and redirects through the identity
+    provider's logout (when it has one) into a new session.
+    """
+    try:
+        _purge_session()
+    finally:
+        st.logout()
+
+
+def _sign_out_button() -> None:
+    """The Sign out button, with the shared-workstation caveat under it."""
+    st.button("Sign out", key="sign_out", icon=":material/logout:", on_click=_sign_out)
+    st.caption(SIGN_OUT_NOTE)
+
+
+def _account_panel(email: str) -> None:
+    """Sidebar account block: who is signed in, and Sign out."""
+    st.caption(f":material/account_circle: Signed in as {_escape_markdown(email)}")
+    _sign_out_button()
 
 
 def _completion_toast(n_ok: int, total: int) -> None:
@@ -405,14 +567,23 @@ def _deferred_export(named_texts: list[tuple[str, str]]) -> Callable[[], str]:
     return _build
 
 
+def _access_ok() -> bool:
+    """Whether this session passed the gate on its last full run (identity, not
+    truthiness). Fragment reruns and widget callbacks skip the gate, so they check
+    this instead."""
+    return st.session_state.get("access_ok") is True
+
+
 def _on_edit(run_id: str, index: int) -> None:
     """Editor `on_change`: an applied edit clears that result's Reviewed flag.
 
     Defensive: while Reviewed is checked the editor renders disabled, and Streamlit
     then discards any incoming value and skips this callback. It fires with the flag
     set only when an edit and a check land in the same rerun — the check is then
-    undone, failing toward review.
+    undone, failing toward review. A no-op for a session that has not passed the gate.
     """
+    if not _access_ok():
+        return
     key = _reviewed_key(run_id, index)
     if st.session_state.get(key) is True:
         st.session_state[key] = False
@@ -420,7 +591,10 @@ def _on_edit(run_id: str, index: int) -> None:
 
 def _on_review(run_id: str, index: int) -> None:
     """Reviewed-checkbox `on_change`. Deliberately a no-op for now: it is wired so
-    its signature is stable when the audit trail hooks sign-off here."""
+    its signature is stable when the audit trail hooks sign-off here. Like
+    `_on_edit`, it must do nothing for a session that has not passed the gate."""
+    if not _access_ok():
+        return
 
 
 def _review_controls(
@@ -576,6 +750,36 @@ DOWNLOAD_LABEL = "Download transcript"
 DOWNLOAD_LOCKED_HELP = (
     'Mark every transcript "Reviewed against the audio" to enable download.'
 )
+# Sign-in copy. A blocked deploy shows visitors no configuration detail (the operator
+# gets the problem on stderr); the anonymous banner is detailed because only an
+# operator who deliberately opted out of sign-in ever sees it.
+SIGN_IN_PROMPT = "Sign in with your work account to use this app."
+SESSION_EXPIRED = "Your sign-in has expired. Sign in again to continue."
+SIGN_IN_UNAVAILABLE = "Sign-in is unavailable. Contact your administrator."
+ANONYMOUS_MODE = (
+    f"**Anonymous mode** — sign-in is off because `{ALLOW_ANONYMOUS_ENV}=1` is set in "
+    "the environment. For local development only: never use it with real patient audio."
+)
+# Why a signed-in account was refused, by nova.access DenyReason; `{email}` is the
+# account's normalized, Markdown-escaped email.
+DENY_MESSAGES = {
+    "email_missing": (
+        "Your sign-in didn't include a usable email address, so access can't be "
+        "checked."
+    ),
+    "email_unverified": (
+        "{email} isn't a verified email address at your identity provider."
+    ),
+    "domain_not_allowed": "{email} is not authorized to use this app.",
+}
+DENY_SUFFIX = (
+    " Sign out and sign in with an authorized work account, or contact your "
+    "administrator."
+)
+SIGN_OUT_NOTE = (
+    "Signing out here may not sign you out of your identity provider — on a shared "
+    "computer, sign out there too."
+)
 
 
 @st.fragment
@@ -587,7 +791,12 @@ def _render_output() -> None:
     Features form). Results are read from session state, so each fragment rerun
     reflects the latest batch; a Run (in the Features form, outside this fragment)
     triggers a full rerun that refreshes it under a new `run_id`.
+
+    Renders nothing unless this session passed the access gate: a fragment rerun
+    skips the gate, and a stopped run leaves the fragment registered.
     """
+    if not _access_ok():
+        return
     responses = st.session_state.get("responses", [])
     audio_sources = st.session_state.get("audio_sources", [])
     run_id = st.session_state.get("run_id", "")
@@ -612,6 +821,14 @@ st.caption(
     "speaker labels, measurement formatting, and PII/PHI redaction."
 )
 
+# Access gate — before anything that reads audio, the API key, or results. It renders
+# its own refusal (sign-in buttons, a denial, or "unavailable"); st.stop() then ends
+# the run. In a bare-mode import (pytest) st.stop() is a no-op, so the code below must
+# tolerate access_decision being None.
+access_decision = _access_gate()
+if access_decision is None:
+    st.stop()
+
 # Environment first (`.env` via load_dotenv), then `st.secrets` for deployed hosts.
 api_key = os.environ.get("DEEPGRAM_API_KEY", "") or _secret_api_key()
 if not api_key:
@@ -631,6 +848,10 @@ if not api_key:
 # transcript lines keep a readable length. Columns stack (inputs first) on narrow viewports.
 input_col, output_col = st.columns(INPUT_OUTPUT_RATIO, gap="medium")
 
+# The input widgets are keyed by a nonce that sign-out rotates, so they come back
+# empty (the uploader drops its files in the browser too).
+input_nonce = st.session_state.get("input_nonce", 0)
+
 with input_col:
     tab_upload, tab_record = st.tabs(
         [":material/upload: Upload", ":material/mic: Record"]
@@ -642,16 +863,28 @@ with input_col:
             type=_AUDIO_TYPES,
             accept_multiple_files=True,
             label_visibility="collapsed",
+            key=f"uploads_{input_nonce}",
         )
 
     with tab_record:
-        recording = st.audio_input("Record audio", label_visibility="collapsed")
+        recording = st.audio_input(
+            "Record audio",
+            label_visibility="collapsed",
+            key=f"recording_{input_nonce}",
+        )
 
 
 # Features live in the sidebar — the canonical home for app-level settings — so the
 # main area is left to the audio inputs and the transcript output. The form batches
 # feature edits so they don't rerun until Run is clicked.
 with st.sidebar:
+    # Who is signed in, and Sign out — only for a signed-in (not anonymous) session.
+    if (
+        access_decision is not None
+        and access_decision.kind == "allow"
+        and access_decision.email
+    ):
+        _account_panel(access_decision.email)
     st.caption(":material/tune: Transcription settings")
     with st.form("features", border=False):
         st.selectbox(

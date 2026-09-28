@@ -52,3 +52,19 @@ AUDIO_EXTENSIONS = (".mp3", ".m4a", ".wav", ".flac", ".ogg")
 # most model-estimated errors. Re-evaluate on a de-identified local sample; 0.85 is the
 # fallback if pilots flag >20% of words. Display-only: never sent to Deepgram, never a widget.
 LOW_CONFIDENCE_THRESHOLD = 0.90
+
+# Sign-in / access control (nova/access.py). The policy itself — providers, allowed
+# email domains — lives in .streamlit/secrets.toml ([auth] / [access]), not here.
+# Local-development opt-out: with no [auth] configured, the app runs without sign-in
+# only when the PROCESS environment sets this to exactly "1". Set in .env or
+# secrets.toml instead, it blocks the app rather than enabling anything.
+ALLOW_ANONYMOUS_ENV = "NOVA_ALLOW_ANONYMOUS"
+# [auth] cookie_secret signs the login cookie; anyone who knows it can forge a
+# sign-in, so a short, placeholder, or low-variety value is refused.
+MIN_COOKIE_SECRET_LENGTH = 32
+# A sign-in older than this (by the ID token's `iat`) must sign in again. Streamlit's
+# identity cookie lasts 30 days and never re-checks the token, so this is what makes
+# deprovisioning at the identity provider take effect within a shift.
+MAX_SESSION_AGE_SECONDS = 12 * 60 * 60
+# An `iat` further in the future than this is refused too (clock skew allowance).
+MAX_CLOCK_SKEW_SECONDS = 5 * 60

@@ -212,6 +212,8 @@ maxUploadSize = 200
 # metrics, not transcript content, but this app's PHI policy is "assume every
 # request/response carries PHI", and an unaudited third-party beacon from a
 # clinical-transcription page is not worth defending. With this false, the only
-# traffic the app originates is the Deepgram API call itself.
+# traffic the app originates is the Deepgram API call itself — plus, when sign-in is
+# configured ([auth] in secrets.toml), the OIDC identity provider: its metadata, JWKS
+# and token endpoints, and the browser's sign-in / sign-out redirects.
 [browser]
 gatherUsageStats = false

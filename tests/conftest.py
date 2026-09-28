@@ -36,7 +36,9 @@ def mock_deepgram_cls():
 
 @pytest.fixture
 def mock_st():
-    session_state = {}
+    # A session that passed the access gate: the functions under test here run only
+    # after it (TestAccessGate checks that the gate itself rewrites this flag).
+    session_state = {"access_ok": True}
     with patch("streamlit_app.st") as mock:
         mock.session_state = session_state
         yield mock
