@@ -19,6 +19,7 @@ Streamlit application for medical transcription using Deepgram's Nova-3 Medical 
 - **Nova-3 Medical** speech-to-text across eight English variants.
 - **Keyterm prompting** — boost recognition of specialized vocabulary (drug names, procedures).
 - **Speaker diarization** with color-coded per-speaker transcript lines.
+- **Low-confidence flags** — words Deepgram scored below 90% confidence are shown in **bold orange**, with a per-result count, so review starts where the model was least sure.
 - **Redaction** — PII for de-identification, plus PHI, PCI, and number groups (PHI and Numbers also strip clinical content).
 - **Smart formatting**, spoken **dictation** commands, and **measurement** abbreviation.
 - **Download** — the transcript as plain text (`.txt`), with a multi-file batch combined into one file.
@@ -62,15 +63,26 @@ Once a request runs:
 
 - **Live progress** — a status panel tracks the batch, with a toast when it finishes.
 - **Transcript** — a single view under a **Transcript** header beside the inputs (stacked below them on narrow screens), displaying the response; multiple results are labeled and divided per file.
-- **Metrics & download** — each transcript is topped with **Duration** and **Confidence** metric cards, and a **Download transcript** (`.txt`) button above the panel saves every result in the batch as one file.
+- **Metrics & download** — each transcript is topped with **Duration**, **Confidence**, and **Low-confidence words** metric cards, and a **Download transcript** (`.txt`) button above the panel saves every result in the batch as one file.
+- **Low-confidence flags** — words scored below 90% model confidence render in **bold orange**, under a caption that says whether any were flagged. If the per-word data is missing, or does not reproduce the transcript exactly, the transcript is shown unhighlighted with a notice to review every word. See [What a flag means](#what-a-flag-means).
 - **Audio player** — pinned above the scrollable transcript. Inline audio over 25 MB — a large upload or a long recording — shows a notice instead of the player to limit memory.
 - **Diarized view** — with **Diarize** on, the transcript is split into color-coded `Speaker 1:`, `Speaker 2:`, … lines.
+
+### What a flag means
+
+A flag is a pointer to the audio, not a verdict — check flagged words first, but review the whole transcript:
+
+- **Threshold** — a word is flagged when Deepgram's per-word confidence is **below 90%** (`LOW_CONFIDENCE_THRESHOLD` in `nova/config.py`). Deepgram describes that score as a calibrated probability; 90% is a starting point to re-evaluate on your own de-identified audio. It is fixed server-side, not a per-user setting.
+- **Unmarked words can still be wrong.** A model can be confidently wrong, and **keyterm prompting inflates confidence** for the boosted terms — a misheard drug name you listed as a keyterm may come back unflagged.
+- **Redaction tags are never flagged** (`[SSN_1]`, `[REDACTED]`, …): the spoken content is gone, so there is nothing to check it against.
+- **A flagged formatted number means "check the whole value."** Smart Format merges a spoken number into one token (a dose, a phone number) with one confidence, so the flag covers all of it.
+- The flags describe Deepgram's original words; the downloaded `.txt` carries the same words, without highlighting.
 
 **Troubleshooting** — if transcription fails with a per-file error (rather than the app refusing to start), check that `DEEPGRAM_API_KEY` is valid and has available credit: an invalid or expired key is reported as a per-item transcription failure, not a startup error.
 
 ## Architecture
 
-- **`nova/`** — the framework-free core (no Streamlit imports): `config` (constants), `transcribe` (`build_options` + `transcribe_batch`), `results` (response walkers). Speakers are Deepgram's native 0-based integers here.
+- **`nova/`** — the framework-free core (no Streamlit imports): `config` (constants), `transcribe` (`build_options` + `transcribe_batch`), `results` (response walkers and low-confidence flagging). Speakers are Deepgram's native 0-based integers here.
 - **`streamlit_app.py`** — the Streamlit UI; a thin adapter over `nova/` that adds widgets, session state, and the renderers (which display speakers 1-based).
 
 ## Testing

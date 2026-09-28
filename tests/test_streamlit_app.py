@@ -357,6 +357,10 @@ class TestDisplayAudio:
 
 
 class TestDisplayTranscript:
+    # The conftest response's 0.85 ("moves") and 0.80 ("fast") words fall below the
+    # 0.90 threshold, so they render flagged in bold orange.
+    FLAGGED = "Life :orange[**moves**] pretty :orange[**fast**] really."
+
     def test_renders_plain_transcript(self, mock_deepgram_cls, mock_st):
         response = (
             mock_deepgram_cls.return_value.listen.v1.media.transcribe_file.return_value
@@ -364,12 +368,11 @@ class TestDisplayTranscript:
 
         streamlit_app._display_transcript(response)
 
-        mock_st.markdown.assert_called_once_with("Life moves pretty fast really.")
+        mock_st.markdown.assert_called_once_with(self.FLAGGED)
 
-    def test_flat_transcript_is_plain_no_raw_html(self, mock_deepgram_cls, mock_st):
-        # The non-diarized path renders the transcript as a single plain Markdown
-        # string: no color directives and no raw HTML.
-        # (Per-speaker color highlighting applies only to the diarized path.)
+    def test_flat_transcript_has_no_raw_html(self, mock_deepgram_cls, mock_st):
+        # The non-diarized path renders one Markdown string per paragraph: native
+        # color directives for the flags, never raw HTML.
         response = (
             mock_deepgram_cls.return_value.listen.v1.media.transcribe_file.return_value
         )
@@ -377,8 +380,9 @@ class TestDisplayTranscript:
         streamlit_app._display_transcript(response)
 
         (markdown_arg,), markdown_kwargs = mock_st.markdown.call_args
-        assert markdown_arg == "Life moves pretty fast really."
+        assert markdown_arg == self.FLAGGED
         assert "unsafe_allow_html" not in markdown_kwargs
+        assert "<" not in markdown_arg
 
     def test_escapes_markdown_metacharacters(self, mock_st):
         response = MagicMock()
@@ -435,7 +439,8 @@ class TestDiarizedTranscript:
             ":green-background[**Speaker 2:**] Hi there.",
             ":blue-background[**Speaker 1:**] Yes?",
         ]
-        mock_st.caption.assert_not_called()
+        # Nothing scored below the threshold, and the caption says so.
+        mock_st.caption.assert_called_once_with(streamlit_app.NO_FLAGS)
 
     def test_single_speaker_renders_one_labeled_line(self, mock_st):
         words = [mock_word("Note.", 0.9, speaker=0), mock_word("Done.", 0.9, speaker=0)]
@@ -475,6 +480,7 @@ class TestDiarizedTranscript:
         word.punctuated_word = None
         word.word = "stat"
         word.speaker = 0
+        word.confidence = 0.9  # a MagicMock confidence would be flagged
 
         streamlit_app._display_transcript(self._response([word]))
 
@@ -518,6 +524,108 @@ class TestDiarizedTranscript:
             ":gray-background[**Speaker 6:**] f.",
             ":blue-background[**Speaker 7:**] g.",
         ]
+
+
+class TestLowConfidenceFlags:
+    """Low-confidence words render as `:orange[**…**]` under a caption; the flagging
+    rule itself (threshold, redaction tags, fidelity guard) is tested in
+    test_results.py."""
+
+    @staticmethod
+    def _response(words, transcript=None):
+        alt = MagicMock(words=words)
+        alt.transcript = transcript
+        response = MagicMock()
+        response.results.channels = [MagicMock(alternatives=[alt])]
+        return response
+
+    def test_flagged_token_inside_diarized_line(self, mock_st):
+        words = [
+            mock_word("Take", 0.95, speaker=0),
+            mock_word("50", 0.42, speaker=0),
+            mock_word("mg.", 0.97, speaker=0),
+        ]
+
+        streamlit_app._display_transcript(self._response(words))
+
+        mock_st.markdown.assert_called_once_with(
+            ":blue-background[**Speaker 1:**] Take :orange[**50**] mg."
+        )
+
+    def test_flagged_token_is_escaped(self, mock_st):
+        words = [mock_word("x_y*", 0.5)]
+
+        streamlit_app._display_transcript(self._response(words, "x_y*"))
+
+        mock_st.markdown.assert_called_once_with(":orange[**x\\_y\\***]")
+
+    def test_legend_caption_when_something_is_flagged(self, mock_st):
+        words = [mock_word("Take", 0.95), mock_word("50", 0.42)]
+
+        streamlit_app._display_transcript(self._response(words, "Take 50"))
+
+        mock_st.caption.assert_called_once_with(streamlit_app.LOW_CONFIDENCE_LEGEND)
+
+    def test_no_flags_caption_when_nothing_is_flagged(self, mock_st):
+        words = [mock_word("Take", 0.95), mock_word("50", 0.99)]
+
+        streamlit_app._display_transcript(self._response(words, "Take 50"))
+
+        mock_st.caption.assert_called_once_with(streamlit_app.NO_FLAGS)
+        mock_st.markdown.assert_called_once_with("Take 50")
+
+    def test_captions_state_the_threshold_and_residual_risk(self):
+        for caption in (streamlit_app.LOW_CONFIDENCE_LEGEND, streamlit_app.NO_FLAGS):
+            assert "90%" in caption
+            assert "can still be wrong" in caption
+        # Plain caption text: a colored sample would fail contrast at caption opacity.
+        assert ":orange[" not in streamlit_app.LOW_CONFIDENCE_LEGEND
+
+    def test_missing_words_fall_back_to_plain_transcript(self, mock_st):
+        response = self._response([], "Take 50 mg.")
+
+        streamlit_app._display_transcript(response)
+
+        mock_st.caption.assert_called_once_with(streamlit_app.NO_CONFIDENCE)
+        mock_st.markdown.assert_called_once_with("Take 50 mg.")
+
+    def test_transcript_mismatch_falls_back_to_plain_transcript(self, mock_st):
+        # Words that do not reproduce the transcript must never be shown in its place.
+        words = [mock_word("Take", 0.4), mock_word("5", 0.4)]
+        response = self._response(words, "Take 50 mg.")
+
+        streamlit_app._display_transcript(response)
+
+        mock_st.caption.assert_called_once_with(streamlit_app.NO_CONFIDENCE)
+        mock_st.markdown.assert_called_once_with("Take 50 mg.")
+
+    def test_paragraphs_render_as_separate_markdown_calls(self, mock_st):
+        words = [
+            mock_word("First.", 0.99),
+            mock_word("Second", 0.3),
+            mock_word("para.", 0.99),
+        ]
+
+        streamlit_app._display_transcript(
+            self._response(words, "First.\n\nSecond para.")
+        )
+
+        rendered = [c.args[0] for c in mock_st.markdown.call_args_list]
+        assert rendered == ["First.", ":orange[**Second**] para."]
+
+    def test_currency_dollar_signs_are_escaped(self, mock_st):
+        # Streamlit's Markdown enables single-dollar math, so "$20-$30" would
+        # otherwise render as a formula with its dollar signs dropped.
+        words = [mock_word("Copay", 0.99), mock_word("$20-$30.", 0.99)]
+
+        streamlit_app._display_transcript(self._response(words, "Copay $20-$30."))
+
+        mock_st.markdown.assert_called_once_with("Copay \\$20-\\$30.")
+
+    def test_plain_fallback_escapes_dollar_signs(self, mock_st):
+        streamlit_app._display_transcript(self._response([], "$20-$30"))
+
+        mock_st.markdown.assert_called_once_with("\\$20-\\$30")
 
 
 class TestOutputPanel:
@@ -637,7 +745,11 @@ class TestMetrics:
         # Assert the formatted value strings, not just the labels — the percent
         # conversion and unit/precision formatting is the logic under test.
         values = {c.args[0]: c.args[1] for c in mock_st.metric.call_args_list}
-        assert values == {"Duration": "3.5 s", "Confidence": "98.0%"}
+        assert values == {
+            "Duration": "3.5 s",
+            "Confidence": "98.0%",
+            "Low-confidence words": "2",
+        }
 
     def test_no_metrics_when_response_has_no_results(self, mock_st):
         # A results-less response (no metadata duration, no alternative confidence)
@@ -647,6 +759,21 @@ class TestMetrics:
         streamlit_app._display_metrics(response)
 
         mock_st.metric.assert_not_called()
+
+    def test_no_count_card_when_highlighting_is_unavailable(self, mock_st):
+        # Words that cannot reproduce the transcript -> no highlighting, so no count
+        # card (a missing count must never read as "0 words to check").
+        alt = MagicMock(words=[mock_word("Other", 0.5)])
+        alt.transcript = "Take 50 mg."
+        alt.confidence = 0.9
+        response = MagicMock()
+        response.metadata.duration = 2.0
+        response.results.channels = [MagicMock(alternatives=[alt])]
+
+        streamlit_app._display_metrics(response)
+
+        values = {c.args[0]: c.args[1] for c in mock_st.metric.call_args_list}
+        assert values == {"Duration": "2.0 s", "Confidence": "90.0%"}
 
     def test_renders_only_the_available_metric(self, mock_st):
         # Duration present but no numeric confidence -> only the Duration card.
@@ -757,10 +884,12 @@ class TestAppSmoke:
       (``language, keyterms, smart_format, diarize, dictation, measurements, redact``).
     - **seeded diarized** — renders the transcript panel for a diarized result,
       asserting the exact 1-based color-directive speaker lines, the
-      Duration/Confidence metric cards, and the dropped-playback caption (the
-      ``download_button`` icon also runs here).
-    - **seeded flat** — the non-diarized render branch: a plain escaped transcript
-      with no speaker labels.
+      Duration/Confidence/Low-confidence words metric cards, the nothing-flagged
+      caption, and the dropped-playback caption (the ``download_button`` icon also
+      runs here).
+    - **seeded flat** — the non-diarized render branch: an escaped transcript with
+      no speaker labels, its one low-confidence word in bold orange under the legend
+      caption.
     - **no-key state** — clears ``DEEPGRAM_API_KEY`` so the key-required warning and
       the API-Key input render.
 
@@ -794,12 +923,12 @@ app = sys.argv[1]
 os.environ["DEEPGRAM_API_KEY"] = "test-key"
 
 
-def _word(text, speaker):
+def _word(text, speaker, confidence=0.9):
     w = MagicMock()
     w.punctuated_word = text
     w.word = text
     w.speaker = speaker
-    w.confidence = 0.9
+    w.confidence = confidence
     return w
 
 
@@ -864,8 +993,9 @@ assert [k for k in order if not k.startswith("FormSubmitter")] == [
 ], order
 
 # 2) Seeded diarized result — asserts the real rendered output: 1-based,
-#    color-highlighted speaker lines; Duration + Confidence metric cards; and the
-#    dropped-playback caption (audio_source is None).
+#    color-highlighted speaker lines; Duration + Confidence + Low-confidence words
+#    metric cards; the nothing-flagged caption (0.9 is not below the 0.90 threshold);
+#    and the dropped-playback caption (audio_source is None).
 diar = _resp("Hello. Hi.", [_word("Hello.", 0), _word("Hi.", 1)], 3.5, 0.95)
 seeded = AppTest.from_file(app, default_timeout=30)
 seeded.session_state["responses"] = [("sample.wav", diar)]
@@ -876,20 +1006,25 @@ assert [m.value for m in seeded.markdown] == [
     ":blue-background[**Speaker 1:**] Hello.",
     ":green-background[**Speaker 2:**] Hi.",
 ], [m.value for m in seeded.markdown]
-assert [m.label for m in seeded.metric] == ["Duration", "Confidence"]
-assert [m.value for m in seeded.metric] == ["3.5 s", "95.0%"]
+assert [m.label for m in seeded.metric] == ["Duration", "Confidence", "Low-confidence words"]
+assert [m.value for m in seeded.metric] == ["3.5 s", "95.0%", "0"]
+assert any("No words scored below 90%" in c.value for c in seeded.caption), [c.value for c in seeded.caption]
 assert any("Inline playback unavailable" in c.value for c in seeded.caption)
 
-# 3) Seeded flat (non-diarized) result — the other render branch: a plain escaped
-#    transcript with no speaker labels.
-flat = _resp("Patient is stable.", [_word("Patient", None)], 12.0, 0.88)
+# 3) Seeded flat (non-diarized) result — the other render branch: an escaped
+#    transcript with no speaker labels, rebuilt from its words so the one
+#    low-confidence word renders in bold orange under the legend caption.
+flat_words = [_word("Patient", None), _word("is", None), _word("stable.", None, 0.5)]
+flat = _resp("Patient is stable.", flat_words, 12.0, 0.88)
 flat_at = AppTest.from_file(app, default_timeout=30)
 flat_at.session_state["responses"] = [("note.wav", flat)]
 flat_at.session_state["audio_sources"] = [None]
 flat_at.run()
 assert not flat_at.exception, flat_at.exception
-assert [m.value for m in flat_at.markdown] == ["Patient is stable."]
+assert [m.value for m in flat_at.markdown] == ["Patient is :orange[**stable.**]"]
 assert not any("Speaker" in m.value for m in flat_at.markdown)
+assert any("bold orange" in c.value for c in flat_at.caption), [c.value for c in flat_at.caption]
+assert [m.value for m in flat_at.metric][-1] == "1"
 
 # 4) No-key state — clear the key, no-op load_dotenv, and empty the secrets search
 #    path, so neither a local .env nor a developer's ~/.streamlit/secrets.toml can

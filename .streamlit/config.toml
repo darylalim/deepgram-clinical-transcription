@@ -17,7 +17,8 @@
 # renders — including the ones it DERIVES rather than reads from here (1.64 frontend):
 #                          dark mode                     light mode
 #   <c>BackgroundColor  = <c>Color at 20% alpha         <c>Color at 10% alpha   (alerts, speaker tints)
-#   <c>TextColor        = <c>Color +15 HSL lightness    <c>Color -15 lightness  (alert body text)
+#   <c>TextColor        = <c>Color +15 HSL lightness    <c>Color -15 lightness  (alert body text,
+#                                                                           :<c>[...] Markdown text)
 # and captions are body text at 60% opacity. So a palette change has to be re-checked on
 # the derived pair, not just the swatch.
 #
@@ -107,10 +108,16 @@ primaryColor = "#2EB3A5"
 blueColor = "#5B9FE0"                # Speaker 1 / st.info
 greenColor = "#4DBA7F"               # Speaker 2 / success accents
 violetColor = "#AE8BE6"              # Speaker 3
-orangeColor = "#E39A4C"              # Speaker 4
+orangeColor = "#E39A4C"              # Speaker 4 / low-confidence word flags (below)
 redColor = "#E5605F"                 # Speaker 5 / st.error — derived text 7.00:1 on its tint
 grayColor = "#98A4AE"                # Speaker 6 / unlabeled-speaker fallback
 yellowColor = "#E3C35A"              # st.warning
+
+# Low-confidence word flags render as `:orange[**word**]`, which Streamlit colors with
+# the DERIVED orange text (+15 lightness: #EDBE8C), not orangeColor itself — 10.62:1 on
+# the canvas (measured in-browser in the bordered output panel, whose background is the
+# canvas). Bold (600) is the non-color cue: orange differs from body text by only
+# ~1.4:1 here, so keep other bold out of transcript text.
 
 # Unused today (the app renders no charts), kept so st.metric sparklines and any
 # future chart open on the accent then follow the speaker order.
@@ -151,7 +158,7 @@ primaryColor = "#177268"
 blueColor = "#2F7BC4"                # Speaker 1 / st.info
 greenColor = "#2E9A62"               # Speaker 2 / success accents
 violetColor = "#8A63D2"              # Speaker 3
-orangeColor = "#C9711E"              # Speaker 4
+orangeColor = "#C9711E"              # Speaker 4 / low-confidence flags: derived #854B14, 6.97:1 on canvas
 redColor = "#D1403F"                 # Speaker 5 / st.error
 grayColor = "#6B7882"                # Speaker 6 / unlabeled-speaker fallback
 yellowColor = "#B8900F"              # st.warning

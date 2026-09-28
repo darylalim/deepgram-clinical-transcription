@@ -18,14 +18,18 @@ from nova.config import (
     DEFAULT_MEASUREMENTS,
     DEFAULT_SMART_FORMAT,
     LANGUAGES as _LANGUAGES,
+    LOW_CONFIDENCE_THRESHOLD,
     MAX_FILE_SIZE,
     MAX_KEYTERMS,
     MAX_UPLOADS,
     REDACT_GROUPS as _REDACT_GROUPS,
 )
 from nova.results import (
+    Token,
     diarized_segments as _diarized_segments,
     first_alternative as _first_alternative,
+    flagged_runs as _flagged_runs,
+    low_confidence_count as _low_confidence_count,
     speaker_label as _speaker_label,
     transcript_text as _transcript_text,
 )
@@ -67,8 +71,10 @@ _AUDIO_MIME = {
     ".ogg": "audio/ogg",
 }
 
-# Inline Markdown metacharacters, escaped so transcript text renders literally.
-_MARKDOWN_SPECIAL = re.compile(r"([\\`*_\[\]~])")
+# Inline Markdown metacharacters, escaped so transcript text renders literally. `$` is
+# included because Streamlit's Markdown always enables single-dollar math: unescaped,
+# smart-formatted currency such as "$20-$30" could render as a formula.
+_MARKDOWN_SPECIAL = re.compile(r"([\\`*_\[\]~$])")
 
 
 def _escape_markdown(text: str) -> str:
@@ -271,43 +277,71 @@ def _result_metrics(response: Any) -> tuple[float | None, float | None]:
 
 
 def _display_metrics(response: Any) -> None:
-    """Render Duration / Confidence metric cards above a transcript, when available."""
+    """Render Duration / Confidence / Low-confidence words cards, when available.
+
+    The low-confidence count is shown only when highlighting is available (so a
+    missing card never reads as "0 words to check").
+    """
     duration, confidence = _result_metrics(response)
-    if duration is None and confidence is None:
+    flagged = _low_confidence_count(response)
+    if duration is None and confidence is None and flagged is None:
         return
     with st.container(horizontal=True):
         if duration is not None:
             st.metric("Duration", f"{duration:.1f} s", border=True)
         if confidence is not None:
             st.metric("Confidence", f"{confidence * 100:.1f}%", border=True)
+        if flagged is not None:
+            st.metric("Low-confidence words", str(flagged), border=True)
+
+
+def _flagged_markdown(tokens: list[Token]) -> str:
+    """Join tokens into escaped Markdown, low-confidence ones as `:orange[**…**]`.
+
+    Bold is the non-color cue (WCAG 1.4.1), and the flag carries no background, so it
+    cannot be mistaken for a `:{color}-background[**Speaker N:**]` label.
+    """
+    return " ".join(
+        f":orange[**{_escape_markdown(t.text)}**]"
+        if t.low_confidence
+        else _escape_markdown(t.text)
+        for t in tokens
+    )
 
 
 def _display_transcript(response: Any) -> None:
     """Render one result's metrics then transcript (Markdown-escaped so it shows verbatim).
 
-    With diarization, render one color-highlighted labeled line per speaker run
-    (1-based, so the first speaker reads "Speaker 1", colored by speaker index);
-    otherwise the flat transcript, or a notice when the response carries no results.
+    The transcript is rebuilt from Deepgram's words so low-confidence ones can be
+    flagged in bold orange, under a caption that says whether any were. With
+    diarization, one color-highlighted labeled line per speaker run (1-based, so the
+    first speaker reads "Speaker 1", colored by speaker index); otherwise one line per
+    paragraph. When the words cannot reproduce the transcript (or are missing), the
+    plain transcript renders unhighlighted under a caption saying so; a response with
+    no results gets a notice instead.
     """
     _display_metrics(response)
-    segments = _diarized_segments(response)
-    if segments:
-        for speaker, text in segments:
-            color = (
-                _SPEAKER_COLORS[speaker % len(_SPEAKER_COLORS)]
-                if isinstance(speaker, int)
-                else "gray"
-            )
-            label = _speaker_label(speaker)
-            st.markdown(
-                f":{color}-background[**Speaker {label}:**] {_escape_markdown(text)}"
-            )
+    runs = _flagged_runs(response)
+    if runs is None:
+        transcript = _transcript_text(response)
+        if transcript is None:
+            st.caption(NO_TRANSCRIPT)
+            return
+        if transcript.strip():
+            st.caption(NO_CONFIDENCE)
+            st.markdown(_escape_markdown(transcript))
         return
-    transcript = _transcript_text(response)
-    if transcript is None:
-        st.caption(NO_TRANSCRIPT)
-        return
-    st.markdown(_escape_markdown(transcript))
+    flagged = any(t.low_confidence for _, tokens in runs for t in tokens)
+    st.caption(LOW_CONFIDENCE_LEGEND if flagged else NO_FLAGS)
+    for speaker, tokens in runs:
+        body = _flagged_markdown(tokens)
+        if speaker is None:
+            st.markdown(body)
+            continue
+        color = _SPEAKER_COLORS[speaker % len(_SPEAKER_COLORS)]
+        st.markdown(
+            f":{color}-background[**Speaker {_speaker_label(speaker)}:**] {body}"
+        )
 
 
 def _plain_transcript(response: Any) -> str:
@@ -385,6 +419,21 @@ def _output_panel(
 
 PLACEHOLDER = ":material/graphic_eq: Select audio, then click Run in the sidebar to see the response here."
 NO_TRANSCRIPT = "No transcript in this response."
+# Low-confidence captions. Plain caption text on purpose, no color directive: at
+# caption opacity (60%) a colored sample would fall to ~2.8:1 in light mode.
+LOW_CONFIDENCE_LEGEND = (
+    ":material/flag: Words in **bold orange** scored below "
+    f"{LOW_CONFIDENCE_THRESHOLD:.0%} model confidence — check them against the audio. "
+    "Unmarked words can still be wrong."
+)
+NO_FLAGS = (
+    f"No words scored below {LOW_CONFIDENCE_THRESHOLD:.0%} model confidence. "
+    "Unmarked words can still be wrong — check against the audio."
+)
+NO_CONFIDENCE = (
+    "Low-confidence highlighting isn't available for this result — "
+    "review every word against the audio."
+)
 PLAYBACK_TOO_LARGE = "Inline playback unavailable for files over 25 MB."
 
 

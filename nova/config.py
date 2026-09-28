@@ -45,3 +45,10 @@ MAX_CONCURRENCY = 5
 MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MiB
 
 AUDIO_EXTENSIONS = (".mp3", ".m4a", ".wav", ".flac", ".ogg")
+
+# Words whose Deepgram per-word confidence is strictly BELOW this are flagged for review.
+# Deepgram calls word confidence a calibrated probability; its 0.65 example is the
+# high-precision/low-recall point. 0.90 flags ~6-7% of words on clean audio and catches
+# most model-estimated errors. Re-evaluate on a de-identified local sample; 0.85 is the
+# fallback if pilots flag >20% of words. Display-only: never sent to Deepgram, never a widget.
+LOW_CONFIDENCE_THRESHOLD = 0.90
