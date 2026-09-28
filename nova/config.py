@@ -45,8 +45,3 @@ MAX_CONCURRENCY = 5
 MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MiB
 
 AUDIO_EXTENSIONS = (".mp3", ".m4a", ".wav", ".flac", ".ogg")
-
-
-def has_audio_extension(url_or_name: str) -> bool:
-    """True when the path (query string stripped) ends in a recognized audio extension."""
-    return url_or_name.split("?")[0].lower().endswith(AUDIO_EXTENSIONS)

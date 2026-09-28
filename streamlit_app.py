@@ -2,7 +2,6 @@ import io
 import os
 import re
 import wave
-from collections.abc import Callable
 from concurrent.futures import as_completed
 from typing import Any
 
@@ -23,7 +22,6 @@ from nova.config import (
     MAX_KEYTERMS,
     MAX_UPLOADS,
     REDACT_GROUPS as _REDACT_GROUPS,
-    has_audio_extension,
 )
 from nova.results import (
     diarized_segments as _diarized_segments,
@@ -31,7 +29,6 @@ from nova.results import (
     speaker_label as _speaker_label,
     transcript_text as _transcript_text,
 )
-from nova.subtitles import to_srt as _to_srt
 from nova.transcribe import build_options, option_warnings, transcribe_batch
 
 load_dotenv()
@@ -42,11 +39,12 @@ load_dotenv()
 # player (the Record tab's own widget still plays them back).
 MAX_RECORDING_SECONDS = 30 * 60
 MAX_PLAYBACK_BYTES = 25 * 1024 * 1024  # larger uploads skip inline playback (memory)
-# Fixed height (px) of the Transcript/JSON output panel. Sized so a single result's
-# panel — below the title, output tabs, download row, and pinned player — ends above
-# the fold of a ~840px-tall viewport (1080p display minus browser chrome), avoiding a
-# page scroll nested around the panel's own scroll. Streamlit has no viewport-relative
-# height, so this is the tallest value that still fits.
+# Fixed height (px) of the transcript output panel. Sized so a single result's panel
+# — below the title, output header, download row, and pinned player — ends above the
+# fold of a ~840px-tall viewport (1080p display minus browser chrome), avoiding a page
+# scroll nested around the panel's own scroll. Measured when a tab strip sat above the
+# panel; the caption header that replaced it is shorter, so the panel still clears the
+# fold. Streamlit has no viewport-relative height, so a fixed value is the only option.
 OUTPUT_HEIGHT = 480
 INPUT_OUTPUT_RATIO = (2, 3)  # main-area column widths: audio inputs | output panel
 
@@ -78,11 +76,9 @@ def _escape_markdown(text: str) -> str:
     return _MARKDOWN_SPECIAL.sub(r"\\\1", text)
 
 
-def _playback_source(value: object) -> bytes | str | None:
-    """Keep URLs and small audio for inline playback; drop large upload bytes (memory)."""
-    if isinstance(value, bytes):
-        return value if len(value) <= MAX_PLAYBACK_BYTES else None
-    return value if isinstance(value, str) else None
+def _playback_source(data: bytes) -> bytes | None:
+    """Keep small audio for inline playback; drop large upload/recording bytes (memory)."""
+    return data if len(data) <= MAX_PLAYBACK_BYTES else None
 
 
 def _secret_api_key() -> str:
@@ -134,8 +130,7 @@ def _transcribe_batch(
     options = build_options(**opts)
     total = len(items)
     sources = {
-        i: _playback_source(kwargs.get("request", kwargs.get("url")))
-        for i, (_, kwargs) in enumerate(items)
+        i: _playback_source(kwargs["request"]) for i, (_, kwargs) in enumerate(items)
     }
 
     with st.status(f"Transcribing 0/{total}...", expanded=True) as status:
@@ -179,21 +174,6 @@ def _process_inputs(api_key: str, files: list[tuple[str, bytes]], **opts) -> Non
     _transcribe_batch(api_key, items, "transcribe_file", **opts)
 
 
-def _process_urls(api_key: str, urls: list[str], **opts) -> None:
-    """Transcribe remote audio URLs with a shared client and store results in session state."""
-    items = [(url, {"url": url}) for url in urls]
-    _transcribe_batch(api_key, items, "transcribe_url", **opts)
-
-
-def _parse_urls(text: str) -> tuple[list[str], list[str]]:
-    """Parse newline-separated text into (valid_urls, invalid_urls)."""
-    raw = [line.strip() for line in text.splitlines()]
-    urls = [u for u in raw if u]
-    valid = [u for u in urls if u.startswith(("http://", "https://"))]
-    invalid = [u for u in urls if not u.startswith(("http://", "https://"))]
-    return valid, invalid
-
-
 def _feature_opts() -> dict[str, Any]:
     """Read the sidebar Features form's control values from session state."""
     return {
@@ -207,14 +187,13 @@ def _feature_opts() -> dict[str, Any]:
     }
 
 
-def _run(api_key: str, uploaded_files: list, recording: Any, url_text: str) -> None:
-    """Validate and transcribe whichever input is provided (priority: upload, record, url)."""
+def _run(api_key: str, uploaded_files: list, recording: Any) -> None:
+    """Validate and transcribe whichever input is provided (priority: upload, record)."""
     present = [
         name
         for name, ok in (
             ("Upload", bool(uploaded_files)),
             ("Record", recording is not None),
-            ("URL", bool(url_text.strip())),
         )
         if ok
     ]
@@ -222,7 +201,7 @@ def _run(api_key: str, uploaded_files: list, recording: Any, url_text: str) -> N
         chosen, *ignored = present
         st.info(
             f"Multiple inputs detected; transcribing {chosen} and ignoring "
-            f"{', '.join(ignored)} (priority: Upload > Record > URL).",
+            f"{', '.join(ignored)} (priority: Upload > Record).",
             icon=":material/info:",
         )
     opts = _feature_opts()
@@ -268,32 +247,12 @@ def _run(api_key: str, uploaded_files: list, recording: Any, url_text: str) -> N
             )
         else:
             _process_inputs(api_key, [("Recording", audio_bytes)], **opts)
-    elif url_text.strip():
-        valid, invalid = _parse_urls(url_text)
-        if invalid:
-            st.error(f"Invalid URL(s): {', '.join(invalid)}", icon=_ICON_ERROR)
-        elif len(valid) > MAX_UPLOADS:
-            st.error(
-                f"Too many URLs. Maximum is {MAX_UPLOADS} per batch.",
-                icon=_ICON_ERROR,
-            )
-        else:
-            no_ext = [u for u in valid if not has_audio_extension(u)]
-            if no_ext:
-                st.warning(
-                    f"Unrecognized audio extension (supported: {', '.join(_AUDIO_TYPES)}): {', '.join(no_ext)}",
-                    icon=_ICON_WARNING,
-                )
-            _process_urls(api_key, valid, **opts)
 
 
-def _display_audio(name: str, source: bytes | str) -> None:
-    """Render an audio player for a transcribed source (file/recording bytes or remote URL)."""
-    if isinstance(source, bytes):
-        mime = _AUDIO_MIME.get(os.path.splitext(name)[1].lower(), "audio/wav")
-        st.audio(source, format=mime)
-    else:
-        st.audio(source)
+def _display_audio(name: str, source: bytes) -> None:
+    """Render an audio player for a transcribed upload or recording (MIME from its name)."""
+    mime = _AUDIO_MIME.get(os.path.splitext(name)[1].lower(), "audio/wav")
+    st.audio(source, format=mime)
 
 
 def _result_metrics(response: Any) -> tuple[float | None, float | None]:
@@ -351,11 +310,6 @@ def _display_transcript(response: Any) -> None:
     st.markdown(_escape_markdown(transcript))
 
 
-def _display_json(response: Any) -> None:
-    """Render one result's raw JSON (shape-agnostic; serializes any Pydantic response)."""
-    st.json(response.model_dump_json())
-
-
 def _plain_transcript(response: Any) -> str:
     """Plain-text transcript for export: diarized 'Speaker N: ...' lines, else flat text."""
     segments = _diarized_segments(response)
@@ -368,12 +322,10 @@ def _plain_transcript(response: Any) -> str:
 
 
 def _transcript_download(responses: list[tuple[str, Any]]) -> None:
-    """Transcript-tab download buttons: plain-text (whole batch) plus SRT for a single result.
+    """Plain-text download button for the whole batch's transcripts.
 
-    The plain-text blob is built lazily via a zero-arg `data` callable, so it is only
-    assembled when the user actually clicks — not on every Transcript-tab fragment
-    rerun. The SRT button appears only for a single result (subtitles map to one media
-    track) and only when the response yields timed cues.
+    The blob is built lazily via a zero-arg `data` callable, so it is only assembled
+    when the user actually clicks — not on every output-fragment rerun.
     """
     if not responses:
         return
@@ -382,31 +334,18 @@ def _transcript_download(responses: list[tuple[str, Any]]) -> None:
         blocks = [f"{name}\n{_plain_transcript(r)}" for name, r in responses]
         return "\n\n".join(blocks)
 
-    # One toolbar row rather than stacked buttons, so the output panel starts higher.
-    with st.container(horizontal=True):
-        st.download_button(
-            "Download transcript",
-            _build_transcript,
-            file_name="transcripts.txt",
-            mime="text/plain",
-            icon=":material/download:",
-        )
-        if len(responses) == 1:
-            srt = _to_srt(responses[0][1])
-            if srt:
-                st.download_button(
-                    "Download subtitles (SRT)",
-                    srt,
-                    file_name="subtitles.srt",
-                    mime="application/x-subrip",
-                    icon=":material/subtitles:",
-                )
+    st.download_button(
+        "Download transcript",
+        _build_transcript,
+        file_name="transcripts.txt",
+        mime="text/plain",
+        icon=":material/download:",
+    )
 
 
 def _output_panel(
     responses: list[tuple[str, Any]],
-    audio_sources: list[bytes | str | None],
-    render: Callable[[Any], None],
+    audio_sources: list[bytes | None],
 ) -> None:
     """Render results in a fixed-height panel.
 
@@ -427,7 +366,7 @@ def _output_panel(
         else:
             st.caption(PLAYBACK_TOO_LARGE)
         with st.container(height=OUTPUT_HEIGHT, border=True):
-            render(response)
+            _display_transcript(response)
         return
 
     with st.container(height=OUTPUT_HEIGHT, border=True):
@@ -441,7 +380,7 @@ def _output_panel(
                 _display_audio(name, source)
             else:
                 st.caption(PLAYBACK_TOO_LARGE)
-            render(response)
+            _display_transcript(response)
 
 
 PLACEHOLDER = ":material/graphic_eq: Select audio, then click Run in the sidebar to see the response here."
@@ -451,30 +390,18 @@ PLAYBACK_TOO_LARGE = "Inline playback unavailable for files over 25 MB."
 
 @st.fragment
 def _render_output() -> None:
-    """Render the Transcript/JSON output tabs as an isolated fragment.
+    """Render the transcript output (header, download button, panel) as a fragment.
 
-    Wrapped in `st.fragment` so switching between the Transcript and JSON tabs reruns
-    only this panel — not the whole script (the input tabs and the Features form).
-    Results are read from session state, so each fragment rerun reflects the latest
-    batch; a Run (in the Features form, outside this fragment) triggers a full rerun
-    that refreshes it. `on_change="rerun"` makes the tabs stateful so `.open` reflects
-    the active tab; `is not False` renders on None (non-stateful fallback) or True and
-    skips only the explicitly-hidden tab — so the JSON tab's per-response
-    `model_dump_json()` is not computed while the Transcript tab is showing.
+    Wrapped in `st.fragment` so a download-button click reruns only this panel — not
+    the whole script (the input tabs and the Features form). Results are read from
+    session state, so each fragment rerun reflects the latest batch; a Run (in the
+    Features form, outside this fragment) triggers a full rerun that refreshes it.
     """
     responses = st.session_state.get("responses", [])
     audio_sources = st.session_state.get("audio_sources", [])
-    tab_transcript, tab_json = st.tabs(
-        [":material/description: Transcript", ":material/data_object: JSON"],
-        on_change="rerun",
-    )
-    if tab_transcript.open is not False:
-        with tab_transcript:
-            _transcript_download(responses)
-            _output_panel(responses, audio_sources, _display_transcript)
-    if tab_json.open is not False:
-        with tab_json:
-            _output_panel(responses, audio_sources, _display_json)
+    st.caption(":material/description: Transcript")
+    _transcript_download(responses)
+    _output_panel(responses, audio_sources)
 
 
 st.set_page_config(
@@ -509,8 +436,8 @@ if not api_key:
 input_col, output_col = st.columns(INPUT_OUTPUT_RATIO, gap="medium")
 
 with input_col:
-    tab_upload, tab_record, tab_url = st.tabs(
-        [":material/upload: Upload", ":material/mic: Record", ":material/link: URL"]
+    tab_upload, tab_record = st.tabs(
+        [":material/upload: Upload", ":material/mic: Record"]
     )
 
     with tab_upload:
@@ -524,17 +451,10 @@ with input_col:
     with tab_record:
         recording = st.audio_input("Record audio", label_visibility="collapsed")
 
-    with tab_url:
-        url_text = st.text_area(
-            "Enter audio file URLs (one per line)",
-            placeholder="https://example.com/audio.mp3\nhttps://example.com/another.mp3",
-            label_visibility="collapsed",
-        )
-
 
 # Features live in the sidebar — the canonical home for app-level settings — so the
-# Transcript / JSON output gets the full main width. The form batches feature edits so
-# they don't rerun until Run is clicked.
+# main area is left to the audio inputs and the transcript output. The form batches
+# feature edits so they don't rerun until Run is clicked.
 with st.sidebar:
     st.caption(":material/tune: Transcription settings")
     with st.form("features", border=False):
@@ -585,7 +505,7 @@ with st.sidebar:
             help='Replaces the selected information with redaction tags in the transcript. For de-identification, use PII (names, locations, IDs). Note: PHI redaction strips clinical content itself (conditions, drugs, injuries), and Numbers redaction removes any run of 3+ digits plus number-like entities (e.g. dates, times, ages, medical statistics, locations), so it redacts clinical values unpredictably ("500 mg" always, shorter values sometimes) — usually the opposite of what a medical transcript should keep.',
             key="redact",
         )
-        has_input = bool(uploaded_files or recording is not None or url_text.strip())
+        has_input = bool(uploaded_files or recording is not None)
         run_clicked = st.form_submit_button(
             "Run",
             type="primary",
@@ -593,7 +513,7 @@ with st.sidebar:
             disabled=not api_key or not has_input,
             help=None
             if (api_key and has_input)
-            else "Add an API key and an upload, recording, or URL to enable transcription.",
+            else "Add an API key and an upload or recording to enable transcription.",
             width="stretch",
         )
 
@@ -601,7 +521,7 @@ with st.sidebar:
 # the inputs that produced it, keeping the output column's top edge fixed.
 if run_clicked:
     with input_col:
-        _run(api_key, uploaded_files, recording, url_text)
+        _run(api_key, uploaded_files, recording)
 
 with output_col:
     _render_output()

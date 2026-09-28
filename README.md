@@ -15,13 +15,13 @@ Streamlit application for medical transcription using Deepgram's Nova-3 Medical 
 
 ## Features
 
-- **Batch transcription** from three input sources — upload files, record from the microphone, or transcribe remote URLs.
+- **Batch transcription** from two input sources — upload files or record from the microphone.
 - **Nova-3 Medical** speech-to-text across eight English variants.
 - **Keyterm prompting** — boost recognition of specialized vocabulary (drug names, procedures).
 - **Speaker diarization** with color-coded per-speaker transcript lines.
 - **Redaction** — PII for de-identification, plus PHI, PCI, and number groups (PHI and Numbers also strip clinical content).
 - **Smart formatting**, spoken **dictation** commands, and **measurement** abbreviation.
-- **Downloads** — plain-text transcript and timestamped, speaker-labeled **SRT** subtitles.
+- **Download** — the transcript as plain text (`.txt`), with a multi-file batch combined into one file.
 - **"Reading room" light & dark themes** — a clinical blue-slate palette with a teal accent that follows your OS light/dark setting (switchable in Settings), WCAG AA throughout in both modes, with self-hosted fonts (no third-party CDN).
 
 ## Prerequisites
@@ -47,9 +47,8 @@ If `DEEPGRAM_API_KEY` is not set, the app prompts for it inline.
 
 - **Upload** — up to 100 audio files (mp3, m4a, wav, flac, ogg; max 200 MB each)
 - **Record** — record from microphone (max 30 minutes)
-- **URL** — transcribe from HTTP/HTTPS URLs (up to 100 per batch)
 
-A **Features** panel in the left sidebar holds the request options, closed by a **Run** button. If you populate more than one input tab, Run transcribes a single one by priority — **Upload, then Record, then URL** — and shows a notice naming which ran and which were ignored.
+A **Features** panel in the left sidebar holds the request options, closed by a **Run** button. If you populate both input tabs, Run transcribes a single one by priority — **Upload, then Record** — and shows a notice naming which ran and which was ignored.
 
 - **Language** — English variants (Nova-3 Medical is English-only)
 - **Keyterm Prompting** — type specialized vocabulary (drug names, procedures, names), Enter to add each, up to 100, to boost recognition
@@ -62,16 +61,16 @@ A **Features** panel in the left sidebar holds the request options, closed by a 
 Once a request runs:
 
 - **Live progress** — a status panel tracks the batch, with a toast when it finishes.
-- **Transcript / JSON tabs** — beside the inputs (stacked below them on narrow screens), displaying the response; multiple results are labeled and divided per file.
-- **Metrics & downloads** — each transcript is topped with **Duration** and **Confidence** metric cards and a **Download transcript** (`.txt`) button; a single result also offers **Download subtitles** (`.srt`, timestamped speaker-labeled cues).
-- **Audio player** — pinned above the scrollable transcript. Inline audio over 25 MB — a large upload or a long recording — shows a notice instead of the player to limit memory; remote URLs always get one.
+- **Transcript** — a single view under a **Transcript** header beside the inputs (stacked below them on narrow screens), displaying the response; multiple results are labeled and divided per file.
+- **Metrics & download** — each transcript is topped with **Duration** and **Confidence** metric cards, and a **Download transcript** (`.txt`) button above the panel saves every result in the batch as one file.
+- **Audio player** — pinned above the scrollable transcript. Inline audio over 25 MB — a large upload or a long recording — shows a notice instead of the player to limit memory.
 - **Diarized view** — with **Diarize** on, the transcript is split into color-coded `Speaker 1:`, `Speaker 2:`, … lines.
 
 **Troubleshooting** — if transcription fails with a per-file error (rather than the app refusing to start), check that `DEEPGRAM_API_KEY` is valid and has available credit: an invalid or expired key is reported as a per-item transcription failure, not a startup error.
 
 ## Architecture
 
-- **`nova/`** — the framework-free core (no Streamlit imports): `config` (constants), `transcribe` (`build_options` + `transcribe_batch`), `results` (response walkers), `subtitles` (`to_srt` — SRT subtitle export). Speakers are Deepgram's native 0-based integers here.
+- **`nova/`** — the framework-free core (no Streamlit imports): `config` (constants), `transcribe` (`build_options` + `transcribe_batch`), `results` (response walkers). Speakers are Deepgram's native 0-based integers here.
 - **`streamlit_app.py`** — the Streamlit UI; a thin adapter over `nova/` that adds widgets, session state, and the renderers (which display speakers 1-based).
 
 ## Testing
@@ -83,7 +82,7 @@ uv run ruff format .  # format
 uv run ty check .     # type check
 ```
 
-Tests mock the Deepgram client — no real API calls. The core is tested directly (`tests/test_transcribe.py`, `tests/test_results.py`, `tests/test_subtitles.py`), the Streamlit adapter in `tests/test_streamlit_app.py`, the dev hooks in `tests/test_hooks.py`, and the project's config — the CI and release workflows, the Dependabot config, and the license — in `tests/test_ci_workflow.py`, `tests/test_release_workflow.py`, `tests/test_dependabot.py`, and `tests/test_license.py`.
+Tests mock the Deepgram client — no real API calls. The core is tested directly (`tests/test_transcribe.py`, `tests/test_results.py`), the Streamlit adapter in `tests/test_streamlit_app.py`, the dev hooks in `tests/test_hooks.py`, and the project's config — the CI and release workflows, the Dependabot config, and the license — in `tests/test_ci_workflow.py`, `tests/test_release_workflow.py`, `tests/test_dependabot.py`, and `tests/test_license.py`.
 
 **Continuous integration** — `.github/workflows/ci.yml` (GitHub Actions) runs these same four gates plus `uv sync --locked` across a Python 3.12 + 3.13 matrix on every push to `main`, every pull request, and manual dispatch. It needs no secrets: tests mock Deepgram, so CI never calls the API. The two matrix legs report as the `checks (3.12)` / `checks (3.13)` status checks that `main` requires, so the job id and matrix values are a branch-protection contract — `tests/test_ci_workflow.py` pins them.
 

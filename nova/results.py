@@ -3,7 +3,7 @@
 Pure getattr-guarded reads with no streamlit imports, kept separate from the renderer
 so they can be unit-tested directly. The walkers keep Deepgram's native 0-based speaker
 integers; `speaker_label` applies the 1-based display offset in one place, shared by the
-Streamlit renderer and the SRT export.
+Streamlit renderer and the plain-text transcript export.
 """
 
 from typing import Any
@@ -18,7 +18,8 @@ def speaker_label(speaker: Any) -> int | None:
     """1-based display label for an integer speaker, or None for a non-integer.
 
     The core keeps speakers as Deepgram's 0-based ints; this is the single place the
-    `+1` display offset is applied (used by the Streamlit renderer and the SRT export).
+    `+1` display offset is applied (used by the Streamlit renderer and the plain-text
+    transcript export).
     """
     return speaker + 1 if isinstance(speaker, int) else None
 

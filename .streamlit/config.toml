@@ -31,8 +31,9 @@ showWidgetBorder = true
 showSidebarBorder = true             # divider between the Features sidebar and the output area
 linkUnderline = false                # color alone signals links — cleaner than underlines
 
-# Typography — Inter (UI) and JetBrains Mono (JSON/code view), SELF-HOSTED from
-# static/ (see the [[theme.fontFaces]] tables below + [server].enableStaticServing).
+# Typography — Inter (UI) and JetBrains Mono (codeFont, for any code rendering),
+# SELF-HOSTED from static/ (see the [[theme.fontFaces]] tables below +
+# [server].enableStaticServing).
 # Streamlit's bundled theme templates load these families from Google Fonts; that is
 # deliberately NOT done here — no request ever leaves the app to a third-party font
 # CDN, which matters for a PHI app. Streamlit falls back to the system sans / mono
@@ -76,7 +77,7 @@ weight = 500
 # Core surfaces — blue-slate (hue ~205°), layered lightest-on-top for depth.
 backgroundColor = "#11171B"          # canvas — deep, not pure black (no halation on text)
 secondaryBackgroundColor = "#1B2329" # widget / container backgrounds, one step up
-codeBackgroundColor = "#1B2329"      # JSON tab blocks match the widget surface
+codeBackgroundColor = "#1B2329"      # code blocks match the widget surface
 textColor = "#E3E9ED"                # body 14.75:1 on canvas; captions (60%) 5.96:1
 codeTextColor = "#C3CED6"            # code sits a step quieter than body text (9.95:1)
 linkColor = "#6EB3EA"                # conventional link blue, 8.00:1 on canvas
