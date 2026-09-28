@@ -18,17 +18,22 @@ LANGUAGES = {
 DEFAULT_LANGUAGE = next(iter(LANGUAGES))
 DEFAULT_SMART_FORMAT = True
 DEFAULT_DICTATION = False
+# Off: Deepgram abbreviates volumes as lowercase "ml" / "l", which ISMP lists as
+# error-prone ("2 l" reads as 21; use mL / L), so abbreviation stays opt-in.
 DEFAULT_MEASUREMENTS = False
 DEFAULT_DIARIZE = False
 
 # Redaction groups (Deepgram `redact` values) -> display labels.
-# PII (de-identification) is listed first; PHI strips clinical content itself, so it
-# is labeled to flag that trade-off in a medical workflow.
+# PII (de-identification) is listed first; PHI and Numbers strip clinical content
+# itself, so both are labeled to flag that trade-off in a medical workflow. Numbers is
+# Deepgram's 3+-consecutive-digit rule plus its number-like entities (dates, times,
+# ages, medical statistics, locations, ...), so "500 mg" is always redacted and
+# shorter clinical values only sometimes: an unpredictable, partly redacted note.
 REDACT_GROUPS = {
     "pii": "PII — de-identify (names, locations, IDs)",
     "phi": "PHI — removes clinical content (conditions, drugs, injuries)",
     "pci": "PCI (card numbers)",
-    "numbers": "Numbers",
+    "numbers": "Numbers — 3+ digits, dates, ages, medical statistics (hits clinical values)",
 }
 
 MAX_KEYTERMS = 100  # client-side cap; Deepgram's real limit is 500 tokens/request

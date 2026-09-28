@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import streamlit_app
 from tests.helpers import mock_upload, mock_word, wav_bytes
 
@@ -74,6 +76,8 @@ class TestProcessInputs:
             keyterms=["metformin"],
             language="en-GB",
             diarize=True,
+            # Opposite of diarize, so a swapped forward is visible whatever the defaults.
+            measurements=False,
             redact=["pii"],
         )
 
@@ -81,6 +85,7 @@ class TestProcessInputs:
         assert kwargs["keyterm"] == ["metformin"]
         assert kwargs["language"] == "en-GB"
         assert kwargs["diarize"] is True
+        assert "measurements" not in kwargs
         assert kwargs["request_options"] == {
             "additional_query_parameters": {"redact": ["pii"]}
         }
@@ -322,6 +327,31 @@ class TestRun:
         media.transcribe_url.assert_called_once()
         media.transcribe_file.assert_not_called()
 
+    @pytest.mark.parametrize("source", ["upload", "record", "url"])
+    def test_option_warning_shown_before_transcribing(
+        self, mock_deepgram_cls, mock_st, source
+    ):
+        mock_st.session_state.update({"dictation": True, "diarize": True})
+        rec = MagicMock()
+        rec.getvalue.return_value = wav_bytes(1)
+        args = {
+            "upload": ([mock_upload("a.wav", b"a")], None, ""),
+            "record": ([], rec, ""),
+            "url": ([], None, "https://example.com/x.wav"),
+        }[source]
+        streamlit_app._run("key", *args)
+
+        (expected,) = streamlit_app.option_warnings(dictation=True, diarize=True)
+        mock_st.warning.assert_called_once_with(expected, icon=":material/warning:")
+        # Shown ahead of the batch's st.status region, whichever input runs.
+        names = [call[0] for call in mock_st.mock_calls]
+        assert names.index("warning") < names.index("status")
+        # Advisory only: the run still goes ahead, with the options as set.
+        media = mock_deepgram_cls.return_value.listen.v1.media
+        method = media.transcribe_url if source == "url" else media.transcribe_file
+        method.assert_called_once()
+        assert method.call_args.kwargs["dictation"] is True
+
     def test_no_input_is_noop(self, mock_deepgram_cls, mock_st):
         streamlit_app._run("key", [], None, "   ")
 
@@ -361,7 +391,7 @@ class TestRun:
         streamlit_app._run("key", [], rec, "")
 
         mock_st.error.assert_called_once_with(
-            "Recording exceeds the 10-minute limit.", icon=":material/error:"
+            "Recording exceeds the 30-minute limit.", icon=":material/error:"
         )
         media = mock_deepgram_cls.return_value.listen.v1.media
         media.transcribe_file.assert_not_called()

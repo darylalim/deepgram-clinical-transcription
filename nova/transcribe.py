@@ -50,6 +50,33 @@ def build_options(
     }
 
 
+def option_warnings(
+    *,
+    keyterms: list[str] | None = None,
+    language: str | None = None,
+    smart_format: bool = DEFAULT_SMART_FORMAT,
+    dictation: bool = DEFAULT_DICTATION,
+    measurements: bool = DEFAULT_MEASUREMENTS,
+    diarize: bool = DEFAULT_DIARIZE,
+    redact: list[str] | None = None,
+) -> list[str]:
+    """Plain-text warnings for option combinations that are likely a mistake.
+
+    Mirrors `build_options`' signature so `option_warnings(**opts)` takes the same dict
+    and a misspelled key raises TypeError instead of passing silently. Messages name
+    options only (never request content), so they carry no PHI; the UI owns icons.
+    The defaults must produce no warnings, or every run would show one.
+    """
+    found: list[str] = []
+    if dictation and diarize:
+        found.append(
+            "Dictation and Diarize are both on. Dictation suits a single clinician "
+            'dictating; in an encounter it can turn patient speech like "period" into '
+            "punctuation. Turn Dictation off for encounters."
+        )
+    return found
+
+
 @dataclass
 class ItemResult:
     """One batch item's outcome, tagged with its input index for order restoration.

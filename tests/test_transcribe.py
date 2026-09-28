@@ -1,6 +1,7 @@
+import inspect
 from unittest.mock import MagicMock, patch
 
-from nova.transcribe import build_options, transcribe_batch
+from nova.transcribe import build_options, option_warnings, transcribe_batch
 
 OPTS = build_options()
 
@@ -75,6 +76,27 @@ class TestBuildOptions:
 
     def test_redact_omitted_when_empty(self):
         assert "request_options" not in build_options(redact=[])
+
+
+class TestOptionWarnings:
+    def test_defaults_warn_nothing(self):
+        # Otherwise every Run would show a warning.
+        assert option_warnings() == []
+
+    def test_dictation_with_diarize_warns(self):
+        (warning,) = option_warnings(dictation=True, diarize=True)
+        assert "Dictation" in warning and "Diarize" in warning
+
+    def test_dictation_or_diarize_alone_is_fine(self):
+        assert option_warnings(dictation=True) == []
+        assert option_warnings(diarize=True) == []
+
+    def test_accepts_the_build_options_kwargs(self):
+        # The UI passes the same _feature_opts dict to both; matching signatures turn a
+        # misspelled key into a TypeError instead of a silently skipped check.
+        assert inspect.signature(option_warnings).parameters == (
+            inspect.signature(build_options).parameters
+        )
 
 
 class TestTranscribeBatch:
