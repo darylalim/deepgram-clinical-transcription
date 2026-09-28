@@ -1,4 +1,5 @@
 import inspect
+import json
 import logging
 import re
 import time
@@ -15,10 +16,28 @@ from nova.access import (
     PROBLEM_TRUSTED_HEADERS,
     Decision,
 )
+from nova.audit import Actor, AuditSchemaError
 from nova.config import ALLOW_ANONYMOUS_ENV
-from tests.helpers import RUN_ID, mock_upload, mock_word, wav_bytes
+from tests.helpers import RUN_ID, audit_lines, mock_upload, mock_word, wav_bytes
 
 FAKE_AUDIO = b"fake-audio-data"
+# Stand-ins for PHI that must never reach a log line: a filename carrying an MRN, the
+# transcript's words, a keyterm, and a URL from an error message.
+PHI_MARKERS = (
+    "Jane_Doe_MRN12345",
+    "MRN12345",
+    "hydroxyzine",
+    "Jane Doe",
+    "rash on left forearm",
+    "https://",
+)
+
+
+def _assert_no_phi(text: str) -> None:
+    lowered = text.lower()
+    for marker in PHI_MARKERS:
+        assert marker.lower() not in lowered, marker
+
 
 # Option building (build_options) and the batch runner (transcribe_batch) are tested
 # directly in tests/test_transcribe.py; the response walkers in tests/test_results.py.
@@ -393,6 +412,183 @@ class TestRun:
         streamlit_app._run("key", [mock_upload("a.wav", b"a")], None)
 
         mock_st.info.assert_not_called()
+
+
+def _recording(data: bytes) -> MagicMock:
+    rec = MagicMock()
+    rec.getvalue.return_value = data
+    return rec
+
+
+class TestRunAudit:
+    """`_run` logs one line per Run — counts and options only, never PHI."""
+
+    def test_run_logs_counts_and_options_never_phi(
+        self, mock_deepgram_cls, mock_st, capsys
+    ):
+        mock_st.session_state["keyterms"] = ["hydroxyzine"]
+        good = MagicMock()
+        good.results.channels[0].alternatives[
+            0
+        ].transcript = (
+            "Patient Jane Doe reports rash on left forearm; start hydroxyzine"
+        )
+
+        def fake_transcribe(request, **_):
+            if request == b"b":
+                raise Exception(
+                    "400 bad audio Jane_Doe_MRN12345.wav https://x/?mrn=MRN12345"
+                )
+            return good
+
+        media = mock_deepgram_cls.return_value.listen.v1.media
+        media.transcribe_file.side_effect = fake_transcribe
+
+        streamlit_app._run(
+            "key",
+            [
+                mock_upload("Jane_Doe_MRN12345.wav", b"a"),
+                mock_upload("Jane_Doe_MRN12345_b.wav", b"b"),
+            ],
+            None,
+        )
+
+        out, err = capsys.readouterr()
+        (line,) = audit_lines(out)
+        assert {
+            k: line[k]
+            for k in (
+                "event",
+                "outcome",
+                "user",
+                "input_kind",
+                "n_items",
+                "n_ok",
+                "n_failed",
+                "n_skipped",
+                "n_keyterms",
+                "language",
+                "redact",
+            )
+        } == {
+            "event": "transcription_run",
+            "outcome": "partial",
+            "user": "clinician@example.org",
+            "input_kind": "upload",
+            "n_items": 2,
+            "n_ok": 1,
+            "n_failed": 1,
+            "n_skipped": 0,
+            "n_keyterms": 1,
+            "language": "en",
+            "redact": [],
+        }
+        # The run id ties this line to the review and download lines that follow.
+        assert line["run"] == mock_st.session_state["run_id"]
+        _assert_no_phi(out + err)
+        # The failure is still reported to the user — on screen only, never logged.
+        assert "Jane_Doe_MRN12345_b.wav" in mock_st.error.call_args.args[0]
+
+    def test_recording_run(self, mock_deepgram_cls, mock_st, capsys):
+        streamlit_app._run("key", [], _recording(wav_bytes(1)))
+
+        (line,) = audit_lines(capsys.readouterr().out)
+        assert (line["event"], line["outcome"], line["input_kind"]) == (
+            "transcription_run",
+            "success",
+            "record",
+        )
+        assert (line["n_items"], line["n_ok"], line["n_skipped"]) == (1, 1, 0)
+
+    def test_oversize_uploads_are_counted_as_skipped(
+        self, mock_deepgram_cls, mock_st, capsys
+    ):
+        big = mock_upload("big.wav", b"x", size=streamlit_app.MAX_FILE_SIZE + 1)
+        streamlit_app._run("key", [big, mock_upload("ok.wav", b"ok")], None)
+
+        (line,) = audit_lines(capsys.readouterr().out)
+        assert (line["n_items"], line["n_ok"], line["n_skipped"]) == (1, 1, 1)
+
+    @pytest.mark.parametrize(
+        ("files", "recording", "kind", "reason", "n_items"),
+        [
+            (
+                [mock_upload(f"f{i}.wav", b"x") for i in range(101)],
+                None,
+                "upload",
+                "too_many_files",
+                101,
+            ),
+            (
+                [
+                    mock_upload("Jane_Doe_MRN12345.wav", b"x", size=2**40),
+                    mock_upload("b.wav", b"x", size=2**40),
+                ],
+                None,
+                "upload",
+                "all_oversize",
+                2,
+            ),
+            ([], _recording(b"not-a-wav"), "record", "recording_unreadable", 1),
+            ([], _recording(wav_bytes(30 * 60 + 1)), "record", "recording_too_long", 1),
+        ],
+        ids=["too-many-files", "all-oversize", "unreadable", "too-long"],
+    )
+    def test_rejections_log_one_line_with_their_reason(
+        self,
+        mock_deepgram_cls,
+        mock_st,
+        capsys,
+        files,
+        recording,
+        kind,
+        reason,
+        n_items,
+    ):
+        streamlit_app._run("key", files, recording)
+
+        out, err = capsys.readouterr()
+        (line,) = audit_lines(out)
+        assert {
+            k: line[k] for k in ("event", "outcome", "input_kind", "reason", "n_items")
+        } == {
+            "event": "transcription_rejected",
+            "outcome": "rejected",
+            "input_kind": kind,
+            "reason": reason,
+            "n_items": n_items,
+        }
+        mock_deepgram_cls.assert_not_called()
+        _assert_no_phi(out + err)
+
+    def test_no_input_logs_nothing(self, mock_deepgram_cls, mock_st, capsys):
+        streamlit_app._run("key", [], None)
+
+        assert capsys.readouterr().out == ""
+
+    def test_missing_actor_fails_before_any_audio_is_sent(
+        self, mock_deepgram_cls, mock_st, capsys
+    ):
+        # Never a silent fallback to "anonymous": that would hide a broken gate.
+        mock_st.session_state.pop("audit_actor")
+
+        with pytest.raises(RuntimeError, match="No audit actor"):
+            streamlit_app._run("key", [mock_upload("a.wav", b"a")], None)
+
+        mock_deepgram_cls.assert_not_called()
+        assert capsys.readouterr().out == ""
+
+    def test_unknown_option_fails_before_any_audio_is_sent(
+        self, mock_deepgram_cls, mock_st, capsys
+    ):
+        mock_st.session_state["language"] = "Jane_Doe_MRN12345"
+
+        with pytest.raises(AuditSchemaError) as exc:
+            streamlit_app._run("key", [mock_upload("a.wav", b"a")], None)
+
+        mock_deepgram_cls.assert_not_called()
+        _assert_no_phi(str(exc.value))
+        assert capsys.readouterr().out == ""
 
 
 class TestDisplayAudio:
@@ -846,20 +1042,134 @@ class TestReviewControls:
         assert f"reviewed_{RUN_ID}_0" not in mock_st.session_state
         assert mock_st.session_state[f"reviewed_{RUN_ID}_1"] is False
 
-    def test_on_review_changes_nothing(self, mock_st):
-        mock_st.session_state[f"reviewed_{RUN_ID}_0"] = True
-
-        streamlit_app._on_review(RUN_ID, 0)
-
-        assert mock_st.session_state == {
-            "access_ok": True,
-            f"reviewed_{RUN_ID}_0": True,
-        }
-
     def test_edit_help_explains_export_apply_and_unlock(self):
         assert "Download saves" in streamlit_app.EDIT_HELP
         assert "Ctrl/⌘+Enter" in streamlit_app.EDIT_HELP
         assert "uncheck Reviewed to edit again" in streamlit_app.EDIT_HELP
+
+
+REVIEWED = f"reviewed_{RUN_ID}_0"
+TEXT = f"transcript_{RUN_ID}_0"
+
+
+class TestReviewAudit:
+    """The Reviewed checkbox's and editor's callbacks log each change in a result's
+    review state exactly once, whatever order Streamlit runs them in."""
+
+    @pytest.fixture
+    def session(self, mock_deepgram_cls, mock_st):
+        # One conftest result (two words below 0.90), its editor still at the seed.
+        response = (
+            mock_deepgram_cls.return_value.listen.v1.media.transcribe_file.return_value
+        )
+        mock_st.session_state.update(
+            {
+                "responses": [("Jane_Doe_MRN12345.wav", response)],
+                "run_id": RUN_ID,
+                TEXT: streamlit_app._plain_transcript(response),
+            }
+        )
+        return mock_st.session_state
+
+    @staticmethod
+    def _events(capsys):
+        return [
+            (line["event"], line.get("edited"))
+            for line in audit_lines(capsys.readouterr().out)
+        ]
+
+    def test_check_logs_a_sign_off(self, session, capsys):
+        session[REVIEWED] = True
+
+        streamlit_app._on_review(RUN_ID, 0)
+
+        out, err = capsys.readouterr()
+        (line,) = audit_lines(out)
+        assert {k: line[k] for k in ("event", "user", "auth")} == {
+            "event": "review_signed_off",
+            "user": "clinician@example.org",
+            "auth": "oidc",
+        }
+        assert (line["run"], line["result_index"], line["n_results"]) == (RUN_ID, 0, 1)
+        assert line["edited"] is False
+        assert line["n_flagged"] == 2  # the conftest response's 0.85 / 0.80 words
+        assert "Jane_Doe" not in out + err
+        assert "Life moves" not in out + err
+
+    def test_uncheck_reopens_and_an_edited_sign_off_says_so(self, session, capsys):
+        session[REVIEWED] = True
+        streamlit_app._on_review(RUN_ID, 0)
+        session[REVIEWED] = False
+        streamlit_app._on_review(RUN_ID, 0)
+        session[TEXT] = "Life moves pretty fast, really."
+        session[REVIEWED] = True
+        streamlit_app._on_review(RUN_ID, 0)
+
+        assert self._events(capsys) == [
+            ("review_signed_off", False),
+            ("review_reopened", None),
+            ("review_signed_off", True),
+        ]
+
+    def test_a_repeated_callback_logs_nothing_new(self, session, capsys):
+        session[REVIEWED] = True
+
+        streamlit_app._on_review(RUN_ID, 0)
+        streamlit_app._on_review(RUN_ID, 0)
+
+        assert self._events(capsys) == [("review_signed_off", False)]
+
+    def test_an_edit_that_undoes_a_logged_check_logs_reopened(self, session, capsys):
+        # An edit and a check in one rerun, checkbox callback first: the sign-off is
+        # logged, then the edit clears the check, which is logged too.
+        session[REVIEWED] = True
+        streamlit_app._on_review(RUN_ID, 0)
+
+        streamlit_app._on_edit(RUN_ID, 0)
+
+        assert session[REVIEWED] is False
+        assert self._events(capsys) == [
+            ("review_signed_off", False),
+            ("review_reopened", None),
+        ]
+
+    def test_an_edit_first_in_the_same_rerun_logs_nothing(self, session, capsys):
+        # Editor callback first (what Streamlit 1.64 does): the check arrived, the
+        # edit clears it before its own callback runs, so the state never changed —
+        # no sign-off, and no "reopened" for a sign-off that was never logged.
+        session[REVIEWED] = True
+
+        streamlit_app._on_edit(RUN_ID, 0)
+        streamlit_app._on_review(RUN_ID, 0)
+
+        assert session[REVIEWED] is False
+        assert capsys.readouterr().out == ""
+
+    def test_an_edit_with_no_check_logs_nothing(self, session, capsys):
+        streamlit_app._on_edit(RUN_ID, 0)
+
+        assert capsys.readouterr().out == ""
+
+    def test_a_new_run_starts_a_fresh_record(self, session, capsys):
+        session[REVIEWED] = True
+        streamlit_app._on_review(RUN_ID, 0)
+        other = "1" * 32
+        session.update({"run_id": other, f"reviewed_{other}_0": True})
+
+        streamlit_app._on_review(other, 0)
+
+        lines = audit_lines(capsys.readouterr().out)
+        assert [(line["event"], line["run"]) for line in lines] == [
+            ("review_signed_off", RUN_ID),
+            ("review_signed_off", other),
+        ]
+
+    def test_a_result_no_longer_in_session_logs_nothing(self, session, capsys):
+        session[f"reviewed_{RUN_ID}_3"] = True
+
+        streamlit_app._on_review(RUN_ID, 3)
+
+        assert capsys.readouterr().out == ""
 
 
 class TestFeatureOpts:
@@ -980,7 +1290,7 @@ class TestTranscriptDownload:
         return mock_st.download_button.call_args
 
     def test_no_button_when_no_responses(self, mock_st):
-        streamlit_app._transcript_download([], [])
+        streamlit_app._transcript_download([], [], RUN_ID)
 
         mock_st.download_button.assert_not_called()
 
@@ -992,7 +1302,9 @@ class TestTranscriptDownload:
         )
         text = streamlit_app._plain_transcript(response)
 
-        streamlit_app._transcript_download([("a.wav", response)], [(text, False)])
+        streamlit_app._transcript_download(
+            [("a.wav", response)], [(text, False)], RUN_ID
+        )
 
         call = self._call_kwargs(mock_st)
         assert call.args == ("Download locked — 0/1 reviewed", "")
@@ -1008,7 +1320,7 @@ class TestTranscriptDownload:
         responses = [("a.wav", MagicMock()), ("b.wav", MagicMock())]
 
         streamlit_app._transcript_download(
-            responses, [("Alpha.", True), ("Beta.", False)]
+            responses, [("Alpha.", True), ("Beta.", False)], RUN_ID
         )
 
         call = self._call_kwargs(mock_st)
@@ -1020,7 +1332,7 @@ class TestTranscriptDownload:
         # Defensive: fewer review pairs than results never unlocks.
         responses = [("a.wav", MagicMock()), ("b.wav", MagicMock())]
 
-        streamlit_app._transcript_download(responses, [("Alpha.", True)])
+        streamlit_app._transcript_download(responses, [("Alpha.", True)], RUN_ID)
 
         call = self._call_kwargs(mock_st)
         assert call.args[1] == ""
@@ -1032,7 +1344,7 @@ class TestTranscriptDownload:
         )
 
         streamlit_app._transcript_download(
-            [("a.wav", response)], [("Life moves pretty fast, really.", True)]
+            [("a.wav", response)], [("Life moves pretty fast, really.", True)], RUN_ID
         )
 
         call = self._call_kwargs(mock_st)
@@ -1063,7 +1375,7 @@ class TestTranscriptDownload:
         mock_st.checkbox.return_value = True
 
         review = streamlit_app._review_controls(RUN_ID, 0, response, 1)
-        streamlit_app._transcript_download([("a.wav", response)], [review])
+        streamlit_app._transcript_download([("a.wav", response)], [review], RUN_ID)
 
         build = mock_st.download_button.call_args.args[1]
         assert build() == "a.wav\nLife moves pretty fast really."
@@ -1072,7 +1384,7 @@ class TestTranscriptDownload:
         responses = [("a.wav", MagicMock()), ("b.wav", MagicMock())]
 
         streamlit_app._transcript_download(
-            responses, [("Alpha, edited.", True), ("Beta.", True)]
+            responses, [("Alpha, edited.", True), ("Beta.", True)], RUN_ID
         )
 
         build = mock_st.download_button.call_args.args[1]
@@ -1084,7 +1396,7 @@ class TestTranscriptDownload:
         # touch `st.*` (a spec=[] Mock raises on any attribute access).
         reviews = [("Reviewed text.", True)]
         mock_st.session_state[f"transcript_{RUN_ID}_0"] = "Reviewed text."
-        streamlit_app._transcript_download([("a.wav", MagicMock())], reviews)
+        streamlit_app._transcript_download([("a.wav", MagicMock())], reviews, RUN_ID)
         build = mock_st.download_button.call_args.args[1]
 
         reviews[0] = ("Changed after render.", True)
@@ -1106,6 +1418,82 @@ class TestTranscriptDownload:
             streamlit_app._plain_transcript(response)
             == "Speaker 1: Hello.\nSpeaker 2: Hi."
         )
+
+
+class TestDownloadAudit:
+    """Each generated download file logs `transcript_downloaded` — from inside the
+    deferred callable, so the line is 1:1 with files actually built."""
+
+    @pytest.fixture
+    def build(self, mock_deepgram_cls, mock_st):
+        # Two reviewed results: the first edited in the editor, the second not.
+        response = (
+            mock_deepgram_cls.return_value.listen.v1.media.transcribe_file.return_value
+        )
+        plain = streamlit_app._plain_transcript(response)
+        streamlit_app._transcript_download(
+            [("Jane_Doe_MRN12345.wav", response), ("b.wav", response)],
+            [("Patient Jane Doe reports rash on left forearm.", True), (plain, True)],
+            RUN_ID,
+        )
+        return mock_st.download_button.call_args.args[1]
+
+    def test_logs_each_file_without_its_content(self, build, capsys):
+        assert capsys.readouterr().out == ""  # built at render, logged on click
+
+        blob = build()
+
+        assert "Jane_Doe_MRN12345.wav" in blob  # the file names its sources...
+        out, err = capsys.readouterr()
+        (line,) = audit_lines(out)
+        assert {k: line[k] for k in ("event", "outcome", "user", "run")} == {
+            "event": "transcript_downloaded",
+            "outcome": "success",
+            "user": "clinician@example.org",
+            "run": RUN_ID,
+        }
+        assert (line["n_results"], line["n_edited"]) == (2, 1)
+        _assert_no_phi(out + err)  # ...the audit line never does
+
+    def test_every_click_is_logged(self, build, capsys):
+        build()
+        build()
+
+        assert [line["event"] for line in audit_lines(capsys.readouterr().out)] == [
+            "transcript_downloaded",
+            "transcript_downloaded",
+        ]
+
+    def test_locked_download_logs_nothing(self, mock_st, capsys):
+        streamlit_app._transcript_download(
+            [("a.wav", MagicMock())], [("Text.", False)], RUN_ID
+        )
+
+        assert mock_st.download_button.call_args.args[1] == ""
+        assert capsys.readouterr().out == ""
+
+    def test_fails_closed_when_the_line_cannot_be_written(self, build, capsys):
+        # No audit line, no file — and the error Streamlit would log is PHI-free.
+        with (
+            patch.object(
+                streamlit_app.audit, "emit", side_effect=AuditSchemaError("run")
+            ),
+            pytest.raises(AuditSchemaError) as exc,
+        ):
+            build()
+
+        _assert_no_phi(str(exc.value))
+        assert capsys.readouterr().out == ""
+
+    def test_missing_actor_keeps_download_from_rendering(self, mock_st):
+        mock_st.session_state.pop("audit_actor")
+
+        with pytest.raises(RuntimeError, match="No audit actor"):
+            streamlit_app._transcript_download(
+                [("a.wav", MagicMock())], [("Text.", True)], RUN_ID
+            )
+
+        mock_st.download_button.assert_not_called()
 
 
 class TestSecretApiKey:
@@ -1385,6 +1773,98 @@ class TestAccessGate:
         for reason in ("email_missing", "email_unverified", "domain_not_allowed"):
             assert streamlit_app.DENY_MESSAGES[reason]
 
+    # The gate's audit record: the session's actor, rewritten every full run, and one
+    # line per kind of outcome — not one per rerun.
+
+    def test_allowed_session_logs_one_session_start(self, mock_st, configured, capsys):
+        mock_st.user.to_dict.return_value = _signed_in("Dr@Hospital.org")
+
+        streamlit_app._access_gate()
+        streamlit_app._access_gate()  # a rerun
+
+        (line,) = audit_lines(capsys.readouterr().out)
+        session = mock_st.session_state["audit_session"]
+        assert re.fullmatch(r"[0-9a-f]{32}", session)
+        assert {k: line[k] for k in ("event", "user", "auth", "session")} == {
+            "event": "session_start",
+            "user": "dr@hospital.org",
+            "auth": "oidc",
+            "session": session,
+        }
+        assert mock_st.session_state["audit_actor"] == Actor(
+            "dr@hospital.org", "oidc", session
+        )
+
+    def test_anonymous_session_is_logged_as_anonymous(
+        self, mock_st, secrets, monkeypatch, capsys
+    ):
+        monkeypatch.setenv(ALLOW_ANONYMOUS_ENV, "1")
+
+        streamlit_app._access_gate()
+
+        (line,) = audit_lines(capsys.readouterr().out)
+        assert (line["event"], line["user"], line["auth"]) == (
+            "session_start",
+            "anonymous",
+            "anonymous",
+        )
+
+    def test_blocked_deploy_logs_one_access_denied(self, mock_st, secrets, capsys):
+        streamlit_app._access_gate()
+        streamlit_app._access_gate()
+
+        (line,) = audit_lines(capsys.readouterr().out)
+        assert {k: line[k] for k in ("event", "outcome", "user", "auth", "reason")} == {
+            "event": "access_denied",
+            "outcome": "denied",
+            "user": None,
+            "auth": "none",
+            "reason": "auth_not_configured",
+        }
+
+    def test_denied_account_is_logged_with_its_reason(
+        self, mock_st, configured, capsys
+    ):
+        mock_st.user.to_dict.return_value = _signed_in("dr_x@evil-hospital.org")
+
+        streamlit_app._access_gate()
+
+        (line,) = audit_lines(capsys.readouterr().out)
+        assert (line["event"], line["reason"], line["user"], line["auth"]) == (
+            "access_denied",
+            "domain_not_allowed",
+            "dr_x@evil-hospital.org",
+            "oidc",
+        )
+
+    def test_sign_in_screen_logs_nothing(self, mock_st, configured, capsys):
+        streamlit_app._access_gate()
+
+        assert capsys.readouterr().out == ""
+        assert mock_st.session_state["audit_actor"].auth == "none"
+
+    def test_session_id_is_kept_across_runs(self, mock_st, configured):
+        streamlit_app._access_gate()
+        session = mock_st.session_state["audit_session"]
+        mock_st.user.to_dict.return_value = _signed_in()
+
+        streamlit_app._access_gate()
+
+        assert mock_st.session_state["audit_actor"].session == session
+
+    def test_stays_closed_if_its_audit_line_cannot_be_written(
+        self, mock_st, configured
+    ):
+        mock_st.user.to_dict.return_value = _signed_in()
+
+        with (
+            patch.object(streamlit_app.audit, "emit", side_effect=OSError("down")),
+            pytest.raises(OSError),
+        ):
+            streamlit_app._access_gate()
+
+        assert mock_st.session_state["access_ok"] is False
+
 
 class TestAccessInputs:
     """The gate's probes of secrets, `.env`, and Authlib."""
@@ -1466,6 +1946,7 @@ class TestSignOut:
                 f"reviewed_{RUN_ID}_0": True,
                 "uploads_0": [MagicMock()],
                 "recording_0": MagicMock(),
+                "audit_review": (RUN_ID, frozenset({0})),
                 "language": "en-GB",  # a setting, not PHI: kept
                 "input_nonce": 0,
             }
@@ -1473,11 +1954,33 @@ class TestSignOut:
 
         streamlit_app._sign_out()
 
+        # The signed-in audit identity ("audit_actor", seeded by conftest) goes too.
         assert mock_st.session_state == {
             "language": "en-GB",
             "input_nonce": 1,
             "access_ok": False,
         }
+        mock_st.logout.assert_called_once_with()
+
+    def test_sign_out_is_logged_under_the_signed_in_account(self, mock_st, capsys):
+        streamlit_app._sign_out()
+
+        (line,) = audit_lines(capsys.readouterr().out)
+        assert (line["event"], line["outcome"], line["user"], line["auth"]) == (
+            "logout",
+            "success",
+            "clinician@example.org",
+            "oidc",
+        )
+
+    def test_purge_and_logout_run_even_if_the_audit_line_fails(self, mock_st):
+        mock_st.session_state.pop("audit_actor")  # so _audit_actor raises
+        mock_st.session_state["responses"] = [("a.wav", MagicMock())]
+
+        with pytest.raises(RuntimeError, match="No audit actor"):
+            streamlit_app._sign_out()
+
+        assert "responses" not in mock_st.session_state
         mock_st.logout.assert_called_once_with()
 
     def test_nonce_starts_from_zero(self, mock_st):
@@ -1535,17 +2038,36 @@ class TestAccessRecheck:
 
         assert mock_st.session_state[f"reviewed_{RUN_ID}_0"] is True
 
+    def test_on_review_does_nothing_without_access(self, mock_st, capsys):
+        mock_st.session_state.update(
+            {
+                "access_ok": False,
+                "responses": [("a.wav", MagicMock())],
+                f"reviewed_{RUN_ID}_0": True,
+            }
+        )
+
+        streamlit_app._on_review(RUN_ID, 0)
+
+        assert capsys.readouterr().out == ""
+        assert "audit_review" not in mock_st.session_state
+
 
 class TestBareImport:
     """`import streamlit_app` runs the module-level access gate in bare mode, where
     `st.stop()` is a no-op, so everything after the gate must tolerate either
     outcome. The root conftest pins this process to one branch (opt-out "0", no
-    secrets); these subprocesses exercise both, so every machine covers both."""
+    secrets); these subprocesses exercise both, so every machine covers both — the
+    gate's audit line included, which is written at import on either branch."""
 
     @pytest.mark.parametrize(
-        ("opt_out", "expected"), [("1", "anonymous"), (None, "None")]
+        ("opt_out", "expected", "logged"),
+        [
+            ("1", "anonymous", ("session_start", "anonymous", None)),
+            (None, "None", ("access_denied", "none", "auth_not_configured")),
+        ],
     )
-    def test_import_survives_either_gate_outcome(self, opt_out, expected):
+    def test_import_survives_either_gate_outcome(self, opt_out, expected, logged):
         import os
         import subprocess
         import sys
@@ -1576,7 +2098,10 @@ print(decision.kind if decision is not None else None)
         )
 
         assert result.returncode == 0, result.stderr
-        assert result.stdout.strip().splitlines()[-1] == expected
+        *audit_output, printed = result.stdout.strip().splitlines()
+        assert printed == expected
+        (line,) = audit_lines("\n".join(audit_output))
+        assert (line["event"], line["auth"], line.get("reason")) == logged
 
 
 class TestAppSmoke:
@@ -1627,6 +2152,14 @@ class TestAppSmoke:
     - **not configured** — no ``[auth]`` and no opt-out: only the generic
       "Sign-in is unavailable" error; the operator's reason goes to stderr, which
       the parent asserts.
+
+    The parent then reads the **audit trail** off the subprocess's stdout: every
+    line one JSON object, grouped by session (one per AppTest instance) — exactly
+    one ``session_start`` per session that passed the gate, whatever its rerun
+    count; run 2's sign-off, one ``transcript_downloaded`` per export generated, and
+    the reopening; ``logout`` after run 5's sign-in; ``access_denied`` with its
+    reason for runs 6 and 8; nothing for the sign-in screen — and that no seeded
+    filename or transcript text reaches stdout or stderr.
 
     No Deepgram call happens — nothing clicks Run — so it never touches the network;
     the toast/per-item status icons fire only on a real batch and are not exercised.
@@ -1994,5 +2527,84 @@ assert not closed.main.columns
         assert result.returncode == 0, result.stderr
         # Run 8's reason reached the operator: nova.access's logger writes to stderr.
         assert f"Sign-in is unavailable: {PROBLEM_NOT_CONFIGURED}" in result.stderr
-        # A refused account's email is shown to that user, never logged.
-        assert "evil-hospital" not in result.stderr + result.stdout
+
+        # The audit trail is stdout, one JSON object per line — and nothing else is
+        # printed there under AppTest (no welcome banner), so every line must be one.
+        stdout = [line for line in result.stdout.splitlines() if line.strip()]
+        assert all(line.startswith('{"v":1') for line in stdout), stdout
+        sessions: dict[str, list[dict]] = {}
+        for line in stdout:
+            event = json.loads(line)
+            sessions.setdefault(event["session"], []).append(event)
+        # One session per AppTest instance, in run order. Run 4 (the sign-in screen)
+        # logs nothing, so it has none.
+        runs = list(sessions.values())
+        anonymous = ("anonymous", "anonymous")
+        assert [(run[0]["user"], run[0]["auth"]) for run in runs] == [
+            anonymous,  # 1 empty
+            anonymous,  # 2 diarized + review walk
+            anonymous,  # 3 flat
+            ("dr@hospital.org", "oidc"),  # 5 signed in, then signed out
+            ("dr@evil-hospital.org", "oidc"),  # 6 denied
+            anonymous,  # 7 no key
+            (None, "none"),  # 8 not configured
+        ]
+        trail = [[event["event"] for event in run] for run in runs]
+        # Exactly one session_start per session that passed the gate, however many
+        # reruns it had (run 2 had a dozen).
+        assert [t.count("session_start") for t in trail] == [1, 1, 1, 1, 0, 1, 0]
+        assert trail[0] == trail[2] == trail[5] == ["session_start"]
+        assert trail[3] == ["session_start", "logout"]
+        assert [(e["event"], e["reason"]) for e in runs[4]] == [
+            ("access_denied", "domain_not_allowed")
+        ]
+        assert [(e["event"], e["reason"]) for e in runs[6]] == [
+            ("access_denied", "auth_not_configured")
+        ]
+        # Run 2's review walk: the edited sign-off, one line per export generated
+        # (three), then the uncheck. The frozen editor's dropped forge logs nothing.
+        assert trail[1][:6] == [
+            "session_start",
+            "review_signed_off",
+            "transcript_downloaded",
+            "transcript_downloaded",
+            "transcript_downloaded",
+            "review_reopened",
+        ], trail[1]
+        signed = runs[1][1]
+        assert (signed["run"], signed["edited"], signed["n_flagged"]) == (
+            RUN_ID,
+            True,
+            0,
+        )
+        assert all(
+            (e["run"], e["n_results"], e["n_edited"]) == (RUN_ID, 1, 1)
+            for e in runs[1]
+            if e["event"] == "transcript_downloaded"
+        )
+        # The edit + check in one rerun: Streamlit 1.64 runs the editor's callback
+        # first, so the state never changed and nothing is logged. Were the checkbox's
+        # to run first, a signed-off / reopened pair would be — never a lone
+        # "reopened" for a sign-off that was never logged.
+        assert trail[1][6:] in ([], ["review_signed_off", "review_reopened"]), trail[1]
+
+        # A refused account's email is shown to that user and recorded only as the
+        # user of its access_denied line (workforce identity, not PHI): never on
+        # stderr, and in no other line.
+        assert "evil-hospital" not in result.stderr
+        (denied,) = [line for line in stdout if "evil-hospital" in line]
+        assert json.loads(denied)["event"] == "access_denied"
+        # No seeded filename or transcript text (edits and forged values included)
+        # reaches either stream.
+        for marker in (
+            "sample.wav",
+            "note.wav",
+            "Hello.",
+            "Hi there",
+            "Patient is",
+            "stable.",
+            "FORGED",
+            "CONTROL",
+            "typed after sign-off",
+        ):
+            assert marker not in result.stdout + result.stderr, marker

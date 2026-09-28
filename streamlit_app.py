@@ -14,6 +14,7 @@ from deepgram import DeepgramClient
 from dotenv import dotenv_values, load_dotenv
 from streamlit.errors import StreamlitSecretNotFoundError
 
+from nova import audit
 from nova.access import (
     Decision,
     SecretsSnapshot,
@@ -180,9 +181,9 @@ def _access_gate() -> Decision | None:
     Returns the Decision when the app may continue (signed in and allowed, or
     anonymous local development), else None after rendering the refusal — the
     caller then calls `st.stop()`. `access_ok` is rewritten on every full run (False
-    before any stop), and the output fragment and review callbacks check it, since
-    they rerun without passing through here. `st.login` is only ever a button
-    callback, never called on render.
+    before any stop, and until the gate's audit record is written), and the output
+    fragment and review callbacks check it, since they rerun without passing through
+    here. `st.login` is only ever a button callback, never called on render.
     """
     decision = decide_access(
         _secrets_snapshot(),
@@ -194,6 +195,9 @@ def _access_gate() -> Decision | None:
         now=time.time(),
     )
     allowed = decision.kind in ("allow", "anonymous")
+    # Closed until the gate's audit record is written: if it cannot be, nothing opens.
+    st.session_state["access_ok"] = False
+    _audit_gate(decision)
     st.session_state["access_ok"] = allowed
 
     if decision.kind == "anonymous":
@@ -225,13 +229,50 @@ def _access_gate() -> Decision | None:
     return decision if allowed else None
 
 
-# Session-state keys holding PHI (or keyed to it) that sign-out removes.
-_PURGED_KEYS = frozenset({"responses", "audio_sources", "run_id", "keyterms"})
+def _audit_gate(decision: Decision) -> None:
+    """Record this session's audit identity, and log the gate's outcome once per kind.
+
+    The actor is rewritten on every full run (which also refreshes its class after a
+    hot reload); the event — session_start, or access_denied with its reason — is
+    logged only when the decision's kind differs from the last one logged, so reruns
+    add nothing. The sign-in screen is not logged: `st.login` redirects into a new
+    session, whose session_start is the login record.
+    """
+    session = st.session_state.setdefault("audit_session", uuid.uuid4().hex)
+    actor = audit.actor_for(decision, session)
+    st.session_state["audit_actor"] = actor
+    if st.session_state.get("audit_gate_state") != decision.kind:
+        event = audit.gate_event(decision)
+        if event is not None:
+            audit.emit(actor, event)
+        st.session_state["audit_gate_state"] = decision.kind
+
+
+def _audit_actor() -> audit.Actor:
+    """This session's audit identity, as the access gate last recorded it.
+
+    Raises rather than falling back to anonymous: a missing actor means the gate never
+    ran for this session, and a silent fallback would hide exactly that. Not
+    isinstance-checked, since a hot reload redefines the class (`audit.emit` reads it
+    by attribute and re-validates it).
+    """
+    actor = st.session_state.get("audit_actor")
+    if actor is None:
+        raise RuntimeError("No audit actor for this session")
+    return actor
+
+
+# Session-state keys holding PHI (or keyed to it) that sign-out removes, plus the
+# signed-in audit identity and review-audit record, which must not outlive the sign-in.
+_PURGED_KEYS = frozenset(
+    {"responses", "audio_sources", "run_id", "keyterms", "audit_actor", "audit_review"}
+)
 _PURGED_PREFIXES = ("transcript_", "reviewed_", "uploads_", "recording_")
 
 
 def _purge_session() -> None:
-    """Drop this session's PHI: results, review state, inputs, and keyterms.
+    """Drop this session's PHI (results, review state, inputs, keyterms) and its
+    audit identity.
 
     Deletes the keys outright — the sign-out rerun stops at the gate, and Streamlit
     purges an unrendered widget's state only after a run that completes — then
@@ -248,16 +289,20 @@ def _purge_session() -> None:
 
 
 def _sign_out() -> None:
-    """Sign-out button callback: purge this session's PHI, then end the sign-in.
+    """Sign-out button callback: log it, purge this session's PHI, end the sign-in.
 
-    `st.logout` runs even if the purge fails — signing out must never depend on
-    anything else. It clears `st.user` and redirects through the identity
-    provider's logout (when it has one) into a new session.
+    The purge and `st.logout` run even if the audit line or the purge fails —
+    signing out must never depend on anything else. `st.logout` clears `st.user` and
+    redirects through the identity provider's logout (when it has one) into a new
+    session.
     """
     try:
-        _purge_session()
+        audit.emit(_audit_actor(), audit.logout())
     finally:
-        st.logout()
+        try:
+            _purge_session()
+        finally:
+            st.logout()
 
 
 def _sign_out_button() -> None:
@@ -368,7 +413,16 @@ def _feature_opts() -> dict[str, Any]:
 
 
 def _run(api_key: str, uploaded_files: list, recording: Any) -> None:
-    """Validate and transcribe whichever input is provided (priority: upload, record)."""
+    """Validate and transcribe whichever input is provided (priority: upload, record).
+
+    Audited: one `transcription_run` line per batch sent, or one
+    `transcription_rejected` line when validation refuses it. The actor and the
+    options' audit projection are resolved first, so a missing actor or an unknown
+    option fails before any audio leaves the app. Only counts, flags and option
+    names reach the audit builders — never a filename, error text, keyterm or
+    transcript.
+    """
+    actor = _audit_actor()
     present = [
         name
         for name, ok in (
@@ -385,6 +439,7 @@ def _run(api_key: str, uploaded_files: list, recording: Any) -> None:
             icon=":material/info:",
         )
     opts = _feature_opts()
+    run_opts = audit.run_options(**opts)
     for message in option_warnings(**opts):
         st.warning(message, icon=_ICON_WARNING)
     if uploaded_files:
@@ -392,6 +447,14 @@ def _run(api_key: str, uploaded_files: list, recording: Any) -> None:
             st.error(
                 f"Too many files. Maximum is {MAX_UPLOADS} per batch.",
                 icon=_ICON_ERROR,
+            )
+            audit.emit(
+                actor,
+                audit.transcription_rejected(
+                    input_kind="upload",
+                    reason="too_many_files",
+                    n_items=len(uploaded_files),
+                ),
             )
             return
         # Backstop: Streamlit already 413s uploads over server.maxUploadSize
@@ -408,7 +471,27 @@ def _run(api_key: str, uploaded_files: list, recording: Any) -> None:
             (f.name, f.getvalue()) for f in uploaded_files if f.size <= MAX_FILE_SIZE
         ]
         if valid:
-            _process_inputs(api_key, valid, **opts)
+            n_ok = _process_inputs(api_key, valid, **opts)
+            audit.emit(
+                actor,
+                audit.transcription_run(
+                    run=st.session_state["run_id"],
+                    input_kind="upload",
+                    n_items=len(valid),
+                    n_ok=n_ok,
+                    n_skipped=len(oversized),
+                    options=run_opts,
+                ),
+            )
+        else:
+            audit.emit(
+                actor,
+                audit.transcription_rejected(
+                    input_kind="upload",
+                    reason="all_oversize",
+                    n_items=len(uploaded_files),
+                ),
+            )
     elif recording is not None:
         audio_bytes = recording.getvalue()
         try:
@@ -419,14 +502,37 @@ def _run(api_key: str, uploaded_files: list, recording: Any) -> None:
                 duration = wf.getnframes() / framerate
         except (wave.Error, EOFError):
             st.error("Could not read the recording.", icon=_ICON_ERROR)
+            audit.emit(
+                actor,
+                audit.transcription_rejected(
+                    input_kind="record", reason="recording_unreadable", n_items=1
+                ),
+            )
             return
         if duration > MAX_RECORDING_SECONDS:
             st.error(
                 f"Recording exceeds the {MAX_RECORDING_SECONDS // 60}-minute limit.",
                 icon=_ICON_ERROR,
             )
+            audit.emit(
+                actor,
+                audit.transcription_rejected(
+                    input_kind="record", reason="recording_too_long", n_items=1
+                ),
+            )
         else:
-            _process_inputs(api_key, [("Recording", audio_bytes)], **opts)
+            n_ok = _process_inputs(api_key, [("Recording", audio_bytes)], **opts)
+            audit.emit(
+                actor,
+                audit.transcription_run(
+                    run=st.session_state["run_id"],
+                    input_kind="record",
+                    n_items=1,
+                    n_ok=n_ok,
+                    n_skipped=0,
+                    options=run_opts,
+                ),
+            )
 
 
 def _display_audio(name: str, source: bytes) -> None:
@@ -551,17 +657,24 @@ def _export_blob(named_texts: list[tuple[str, str]]) -> str:
     return "\n\n".join(f"{name}\n{text}" for name, text in named_texts)
 
 
-def _deferred_export(named_texts: list[tuple[str, str]]) -> Callable[[], str]:
-    """Zero-arg `data` callable for the download button, over texts captured now.
+def _deferred_export(
+    named_texts: list[tuple[str, str]], actor: audit.Actor, event: audit.AuditEvent
+) -> Callable[[], str]:
+    """Zero-arg `data` callable for the download button, over values captured now.
 
-    Streamlit runs it only on click, on a worker thread with no ScriptRunContext, so
-    it must never touch `st.*` (session state included): it closes over plain strings
-    captured at render. It also must not raise — Streamlit logs a failing callable
-    with its traceback, which could carry transcript text.
+    Streamlit runs it on every click, on a worker thread with no ScriptRunContext, so
+    it must never touch `st.*` (session state included): it closes over plain
+    strings, the audit actor, and the already-validated `transcript_downloaded`
+    event, all captured at render. It logs that event, then returns the file — one
+    audit line per file generated. It raises only if the line cannot be written,
+    which fails the download closed; Streamlit logs a failing callable with its
+    traceback, so every exception on this path must be PHI-free (an
+    `AuditSchemaError` names fields, never values), and nothing else here can fail.
     """
     captured = [(str(name), str(text)) for name, text in named_texts]
 
     def _build() -> str:
+        audit.emit(actor, event)
         return _export_blob(captured)
 
     return _build
@@ -574,27 +687,74 @@ def _access_ok() -> bool:
     return st.session_state.get("access_ok") is True
 
 
+def _audit_review(run_id: str, index: int) -> None:
+    """Log a change in result `index`'s Reviewed state — once per actual change.
+
+    Compares the flag with the last state this run's audit trail recorded
+    (`audit_review`: the run id and the indexes logged as signed off), so the log
+    follows the state, not the callbacks. That matters when an edit and a check land
+    in the same rerun: Streamlit does not guarantee the two callbacks' order (1.64
+    runs the editor's first), and `_on_edit` then clears the check. Checkbox-first
+    logs signed-off then reopened; editor-first leaves the flag where it started and
+    logs nothing — never a "reopened" for a sign-off that was never recorded.
+    `edited` compares the editor's text with Deepgram's plain transcript.
+    """
+    responses = st.session_state.get("responses", [])
+    if not 0 <= index < len(responses):
+        return  # not a result of this session (unreachable through the UI)
+    recorded = st.session_state.get("audit_review")
+    signed: frozenset[int] = (
+        recorded[1]
+        if isinstance(recorded, tuple) and recorded[0] == run_id
+        else frozenset()
+    )
+    reviewed = _is_reviewed(run_id, index)
+    if reviewed == (index in signed):
+        return
+    response = responses[index][1]
+    if reviewed:
+        text = st.session_state.get(_text_key(run_id, index))
+        event = audit.review_signed_off(
+            run=run_id,
+            result_index=index,
+            n_results=len(responses),
+            edited=isinstance(text, str) and text != _plain_transcript(response),
+            n_flagged=_low_confidence_count(response),
+        )
+    else:
+        event = audit.review_reopened(
+            run=run_id, result_index=index, n_results=len(responses)
+        )
+    audit.emit(_audit_actor(), event)
+    st.session_state["audit_review"] = (
+        run_id,
+        signed | {index} if reviewed else signed - {index},
+    )
+
+
 def _on_edit(run_id: str, index: int) -> None:
     """Editor `on_change`: an applied edit clears that result's Reviewed flag.
 
     Defensive: while Reviewed is checked the editor renders disabled, and Streamlit
     then discards any incoming value and skips this callback. It fires with the flag
     set only when an edit and a check land in the same rerun — the check is then
-    undone, failing toward review. A no-op for a session that has not passed the gate.
+    undone, failing toward review (and audited if the sign-off already was). A no-op
+    for a session that has not passed the gate.
     """
     if not _access_ok():
         return
     key = _reviewed_key(run_id, index)
     if st.session_state.get(key) is True:
         st.session_state[key] = False
+        _audit_review(run_id, index)
 
 
 def _on_review(run_id: str, index: int) -> None:
-    """Reviewed-checkbox `on_change`. Deliberately a no-op for now: it is wired so
-    its signature is stable when the audit trail hooks sign-off here. Like
-    `_on_edit`, it must do nothing for a session that has not passed the gate."""
+    """Reviewed-checkbox `on_change`: audit the sign-off, or its reopening. Like
+    `_on_edit`, it does nothing for a session that has not passed the gate."""
     if not _access_ok():
         return
+    _audit_review(run_id, index)
 
 
 def _review_controls(
@@ -637,7 +797,7 @@ def _review_controls(
 
 
 def _transcript_download(
-    responses: list[tuple[str, Any]], reviews: list[tuple[str, bool]]
+    responses: list[tuple[str, Any]], reviews: list[tuple[str, bool]], run_id: str
 ) -> None:
     """Plain-text download of the batch's edited transcripts, gated on review.
 
@@ -647,8 +807,10 @@ def _transcript_download(
     transcripts: `disabled` is enforced only in the browser on the deferred-file
     path, so this is the server-side half of the gate. Unlocked, the blob is a
     deferred callable over the editors' text captured at this render (assembled only
-    on click), and `on_click="ignore"` skips the pointless rerun a click would
-    otherwise trigger.
+    on click) that also logs `transcript_downloaded` — its actor and event (the run,
+    and how many results were edited) are built here, since the callable runs
+    without session context. `on_click="ignore"` skips the pointless rerun a click
+    would otherwise trigger.
     """
     if not responses:
         return
@@ -659,7 +821,15 @@ def _transcript_download(
     if unlocked:
         names = [name for name, _ in responses]
         texts = [text for text, _ in reviews]
-        data = _deferred_export(list(zip(names, texts, strict=True)))
+        n_edited = sum(
+            1
+            for (_, response), text in zip(responses, texts, strict=True)
+            if text != _plain_transcript(response)
+        )
+        event = audit.transcript_downloaded(run=run_id, n_results=n, n_edited=n_edited)
+        data = _deferred_export(
+            list(zip(names, texts, strict=True)), _audit_actor(), event
+        )
     st.download_button(
         DOWNLOAD_LABEL if unlocked else f"Download locked — {done}/{n} reviewed",
         data,
@@ -806,7 +976,7 @@ def _render_output() -> None:
     download_row = st.empty()
     reviews = _output_panel(responses, audio_sources, run_id)
     with download_row:
-        _transcript_download(responses, reviews)
+        _transcript_download(responses, reviews, run_id)
 
 
 st.set_page_config(

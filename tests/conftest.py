@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nova.audit import Actor
 from tests.helpers import mock_word
 
 
@@ -37,8 +38,14 @@ def mock_deepgram_cls():
 @pytest.fixture
 def mock_st():
     # A session that passed the access gate: the functions under test here run only
-    # after it (TestAccessGate checks that the gate itself rewrites this flag).
-    session_state = {"access_ok": True}
+    # after it (TestAccessGate checks that the gate itself rewrites these), so it has
+    # the signed-in audit identity the gate records.
+    session_state = {
+        "access_ok": True,
+        "audit_actor": Actor(
+            user="clinician@example.org", auth="oidc", session="a" * 32
+        ),
+    }
     with patch("streamlit_app.st") as mock:
         mock.session_state = session_state
         yield mock

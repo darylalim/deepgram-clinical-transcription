@@ -1,4 +1,5 @@
 import io
+import json
 import wave
 from unittest.mock import MagicMock
 
@@ -33,3 +34,14 @@ def wav_bytes(seconds: int) -> bytes:
         wf.setframerate(1)
         wf.writeframes(b"\x00\x00" * seconds)
     return buf.getvalue()
+
+
+def audit_lines(out: str) -> list[dict]:
+    """Parse captured stdout as the audit trail: every non-empty line one JSON object.
+
+    Strict on purpose — anything else on stdout fails the parse. Read stdout with
+    `capsys`, never `caplog`: the audit logger does not propagate, and caplog then
+    sees its records only depending on test order (and never the stdout line a log
+    shipper reads).
+    """
+    return [json.loads(line) for line in out.splitlines() if line.strip()]

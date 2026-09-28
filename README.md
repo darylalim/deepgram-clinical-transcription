@@ -25,6 +25,7 @@ Streamlit application for medical transcription using Deepgram's Nova-3 Medical 
 - **Redaction** — PII for de-identification, plus PHI, PCI, and number groups (PHI and Numbers also strip clinical content).
 - **Smart formatting**, spoken **dictation** commands, and **measurement** abbreviation.
 - **Download** — the reviewed (and edited) transcripts as plain text (`.txt`), with a multi-file batch combined into one file. Locked until every result in the batch is marked reviewed.
+- **Audit trail** — sign-ins, refusals, runs, sign-offs, and downloads, written as one JSON line each to the server's stdout: who did what and when, with counts and settings but never a filename, transcript, or keyterm. See [Audit trail](#audit-trail).
 - **"Reading room" light & dark themes** — a clinical blue-slate palette with a teal accent that follows your OS light/dark setting (switchable in Settings), WCAG AA throughout in both modes, with self-hosted fonts (no third-party CDN).
 
 ## Prerequisites
@@ -146,10 +147,43 @@ Every visitor passes a sign-in gate before the app renders anything else: no inp
 - **Uploads.** Streamlit's upload endpoint (`/_stcore/upload_file/…`) checks XSRF and the session, not sign-in. A client sitting on the sign-in screen can still push files of up to 200 MB each into server memory. For an internet-facing deployment, set body-size and rate limits on that path at a reverse proxy, or put an auth proxy (oauth2-proxy, IAP) in front of the app.
 - **Outbound traffic.** With sign-in configured, the server contacts the identity provider (its metadata, JWKS, and token endpoints), and the browser is redirected there to sign in and out.
 
+## Audit trail
+
+The app records who did what, and when, as one JSON object per line on the server's **stdout**. The trail is built in `nova/audit.py`.
+
+| Event | Logged when | `outcome` | Fields after the envelope |
+|---|---|---|---|
+| `session_start` | a browser session passes the sign-in gate (after a sign-in, this is the login record) | `success` | — |
+| `access_denied` | a signed-in account is refused, or sign-in is unavailable | `denied` | `reason` |
+| `logout` | **Sign out** is clicked | `success` | — |
+| `transcription_run` | a **Run** sends audio to Deepgram | `success`, `partial`, or `failure` | `run`, `input_kind`, `n_items`, `n_ok`, `n_failed`, `n_skipped`, `language`, `smart_format`, `diarize`, `dictation`, `measurements`, `redact`, `n_keyterms` |
+| `transcription_rejected` | a **Run** is refused before any audio is sent (too many files, all too large, a recording that is unreadable or too long) | `rejected` | `input_kind`, `reason`, `n_items` |
+| `review_signed_off` | a result is marked **Reviewed against the audio** | `success` | `run`, `result_index`, `n_results`, `edited`, `n_flagged` |
+| `review_reopened` | a reviewed result is made unreviewed again | `success` | `run`, `result_index`, `n_results` |
+| `transcript_downloaded` | a download file is generated (every click) | `success` | `run`, `n_results`, `n_edited` |
+
+Every line starts with the same envelope, in this order: `v` (schema version, `1`), `ts` (UTC, milliseconds), `event`, `outcome`, `user`, `auth`, `session`. For example:
+
+```json
+{"v":1,"ts":"2026-09-28T14:03:12.345Z","event":"transcription_run","outcome":"partial","user":"dr.smith@hospital.org","auth":"oidc","session":"<32 hex>","run":"<32 hex>","input_kind":"upload","n_items":3,"n_ok":2,"n_failed":1,"n_skipped":1,"language":"en-US","smart_format":true,"diarize":true,"dictation":false,"measurements":false,"redact":["numbers","pii"],"n_keyterms":2}
+```
+
+- **Who.** `user` is the signed-in email (`auth` `oidc`), `anonymous` in anonymous mode, or null (`auth` `none`) when sign-in is unavailable. A refused account's email is recorded in its `access_denied` line. `session` is a random id per browser session, and `run` is a random id per Run that links it to its sign-offs and downloads. `result_index` is a result's position in the batch, starting at 0.
+- **Never PHI.** No field holds free text. Values are counts, true/false flags, values from fixed lists, or random ids. Filenames, transcripts, keyterms (only their count is kept), URLs, and error messages have nowhere to go. A value that doesn't fit is refused instead of logged, and the error names only the field.
+- **What `edited` and `n_flagged` mean.** `edited` is true when the text signed off differs from Deepgram's transcript. `n_flagged` is the result's count of low-confidence words (null when highlighting was unavailable). `n_edited` counts the edited results in a download.
+- **It fails closed where it can.** A download file is generated only after its line is written. If the line can't be written, whether it is invalid or stdout itself is closed or broken, the download fails. A session whose gate line can't be written doesn't open. A Run is logged once its batch finishes, so a failure there shows an error but can't unsend the audio.
+
+**Operating it:**
+
+- Audit lines go to stdout; Streamlit's own logs go to stderr. stdout also carries Streamlit's startup banner and a `Stopping...` line at shutdown, so a log shipper should keep only the lines that parse as JSON with a `v` key.
+- Each server process writes its own stream. With several replicas, merging and ordering the streams is the log pipeline's job; timestamps can tie.
+- In production, alert on any line with `"auth":"anonymous"`. Anonymous mode is for local development only.
+- The trail is personal data (staff emails, and the emails of refused accounts). Restrict who can read it, and set a retention period; six years, HIPAA's documentation retention period, is the usual benchmark.
+
 ## Architecture
 
-- **`nova/`** — the framework-free core (no Streamlit imports): `config` (constants), `transcribe` (`build_options` + `transcribe_batch`), `results` (response walkers and low-confidence flagging), `access` (the sign-in policy). Speakers are Deepgram's native 0-based integers here.
-- **`streamlit_app.py`** — the Streamlit UI; a thin adapter over `nova/` that adds the sign-in gate, widgets, session state, the renderers (which display speakers 1-based), and the review/sign-off gate on Download.
+- **`nova/`** — the framework-free core (no Streamlit imports): `config` (constants), `transcribe` (`build_options` + `transcribe_batch`), `results` (response walkers and low-confidence flagging), `access` (the sign-in policy), `audit` (the audit trail). Speakers are Deepgram's native 0-based integers here.
+- **`streamlit_app.py`** — the Streamlit UI; a thin adapter over `nova/` that adds the sign-in gate, widgets, session state, the renderers (which display speakers 1-based), the review/sign-off gate on Download, and the audit calls.
 
 ## Testing
 
@@ -160,7 +194,7 @@ uv run ruff format .  # format
 uv run ty check .     # type check
 ```
 
-Tests mock the Deepgram client — no real API calls. The core is tested directly (`tests/test_transcribe.py`, `tests/test_results.py`, `tests/test_access.py`), the Streamlit adapter in `tests/test_streamlit_app.py`, the dev hooks in `tests/test_hooks.py`, and the project's config — the CI and release workflows, the Dependabot config, and the license — in `tests/test_ci_workflow.py`, `tests/test_release_workflow.py`, `tests/test_dependabot.py`, and `tests/test_license.py`.
+Tests mock the Deepgram client — no real API calls. The core is tested directly (`tests/test_transcribe.py`, `tests/test_results.py`, `tests/test_access.py`, `tests/test_audit.py`), the Streamlit adapter in `tests/test_streamlit_app.py`, the dev hooks in `tests/test_hooks.py`, and the project's config — the CI and release workflows, the Dependabot config, and the license — in `tests/test_ci_workflow.py`, `tests/test_release_workflow.py`, `tests/test_dependabot.py`, and `tests/test_license.py`.
 
 **Continuous integration** — `.github/workflows/ci.yml` (GitHub Actions) runs these same four gates plus `uv sync --locked` across a Python 3.12 + 3.13 matrix on every push to `main`, every pull request, and manual dispatch. It needs no secrets: tests mock Deepgram, so CI never calls the API. The two matrix legs report as the `checks (3.12)` / `checks (3.13)` status checks that `main` requires, so the job id and matrix values are a branch-protection contract — `tests/test_ci_workflow.py` pins them.
 
