@@ -32,11 +32,15 @@ from nova.results import (
     transcript_text as _transcript_text,
 )
 from nova.subtitles import to_srt as _to_srt
-from nova.transcribe import build_options, transcribe_batch
+from nova.transcribe import build_options, option_warnings, transcribe_batch
 
 load_dotenv()
 
-MAX_RECORDING_SECONDS = 10 * 60  # 10 minutes
+# 30 minutes — covers a standard clinic encounter. At st.audio_input's default 16 kHz
+# 16-bit mono WAV (32 kB/s) that is ~58 MB: well under the 200 MB upload cap, but
+# past MAX_PLAYBACK_BYTES from ~13.6 min, so longer recordings skip the output-panel
+# player (the Record tab's own widget still plays them back).
+MAX_RECORDING_SECONDS = 30 * 60
 MAX_PLAYBACK_BYTES = 25 * 1024 * 1024  # larger uploads skip inline playback (memory)
 # Fixed height (px) of the Transcript/JSON output panel. Sized so a single result's
 # panel — below the title, output tabs, download row, and pinned player — ends above
@@ -191,7 +195,7 @@ def _parse_urls(text: str) -> tuple[list[str], list[str]]:
 
 
 def _feature_opts() -> dict[str, Any]:
-    """Read the current Features-tab control values from session state."""
+    """Read the sidebar Features form's control values from session state."""
     return {
         "keyterms": st.session_state.get("keyterms", []),
         "language": st.session_state.get("language", DEFAULT_LANGUAGE),
@@ -221,6 +225,9 @@ def _run(api_key: str, uploaded_files: list, recording: Any, url_text: str) -> N
             f"{', '.join(ignored)} (priority: Upload > Record > URL).",
             icon=":material/info:",
         )
+    opts = _feature_opts()
+    for message in option_warnings(**opts):
+        st.warning(message, icon=_ICON_WARNING)
     if uploaded_files:
         if len(uploaded_files) > MAX_UPLOADS:
             st.error(
@@ -242,7 +249,7 @@ def _run(api_key: str, uploaded_files: list, recording: Any, url_text: str) -> N
             (f.name, f.getvalue()) for f in uploaded_files if f.size <= MAX_FILE_SIZE
         ]
         if valid:
-            _process_inputs(api_key, valid, **_feature_opts())
+            _process_inputs(api_key, valid, **opts)
     elif recording is not None:
         audio_bytes = recording.getvalue()
         try:
@@ -255,9 +262,12 @@ def _run(api_key: str, uploaded_files: list, recording: Any, url_text: str) -> N
             st.error("Could not read the recording.", icon=_ICON_ERROR)
             return
         if duration > MAX_RECORDING_SECONDS:
-            st.error("Recording exceeds the 10-minute limit.", icon=_ICON_ERROR)
+            st.error(
+                f"Recording exceeds the {MAX_RECORDING_SECONDS // 60}-minute limit.",
+                icon=_ICON_ERROR,
+            )
         else:
-            _process_inputs(api_key, [("Recording", audio_bytes)], **_feature_opts())
+            _process_inputs(api_key, [("Recording", audio_bytes)], **opts)
     elif url_text.strip():
         valid, invalid = _parse_urls(url_text)
         if invalid:
@@ -274,7 +284,7 @@ def _run(api_key: str, uploaded_files: list, recording: Any, url_text: str) -> N
                     f"Unrecognized audio extension (supported: {', '.join(_AUDIO_TYPES)}): {', '.join(no_ext)}",
                     icon=_ICON_WARNING,
                 )
-            _process_urls(api_key, valid, **_feature_opts())
+            _process_urls(api_key, valid, **opts)
 
 
 def _display_audio(name: str, source: bytes | str) -> None:
@@ -512,7 +522,7 @@ with input_col:
         )
 
     with tab_record:
-        recording = st.audio_input("Record a dictation", label_visibility="collapsed")
+        recording = st.audio_input("Record audio", label_visibility="collapsed")
 
     with tab_url:
         url_text = st.text_area(
@@ -552,19 +562,19 @@ with st.sidebar:
         st.toggle(
             "Diarize",
             value=DEFAULT_DIARIZE,
-            help="Detects speaker changes and labels turns as Speaker 1, Speaker 2, … in the transcript. Speakers are numbered, not named by role.",
+            help="Detects speaker changes and labels turns as Speaker 1, Speaker 2, … in the transcript. Speakers are numbered, not named by role. Use for clinician–patient encounters, with Dictation off.",
             key="diarize",
         )
         st.toggle(
             "Dictation",
             value=DEFAULT_DICTATION,
-            help='Converts spoken formatting commands into characters (e.g. "period" becomes ".", "new paragraph" starts a new line). Automatically enables punctuation.',
+            help='Converts spoken formatting commands into characters (e.g. "period" becomes ".", "new paragraph" starts a new line). Automatically enables punctuation. For a single clinician dictating — turn off for encounters, where patient speech could be converted too.',
             key="dictation",
         )
         st.toggle(
             "Measurements",
             value=DEFAULT_MEASUREMENTS,
-            help='Converts spoken measurements into abbreviated units (e.g. "five milligrams" becomes "5 mg").',
+            help='Converts spoken measurements into abbreviated units (e.g. "five milligrams" becomes "5 mg"). Note: volumes come out as lowercase "ml" and "l", which ISMP lists as error-prone (use mL and L) — review volumes before clinical use.',
             key="measurements",
         )
         st.multiselect(
@@ -572,7 +582,7 @@ with st.sidebar:
             options=list(_REDACT_GROUPS),
             format_func=lambda group: _REDACT_GROUPS[group],
             placeholder="Select information to redact...",
-            help="Replaces the selected information with redaction tags in the transcript. For de-identification, use PII (names, locations, IDs). Note: PHI redaction strips clinical content itself (conditions, drugs, injuries) — usually the opposite of what a medical transcript should keep.",
+            help='Replaces the selected information with redaction tags in the transcript. For de-identification, use PII (names, locations, IDs). Note: PHI redaction strips clinical content itself (conditions, drugs, injuries), and Numbers redaction removes any run of 3+ digits plus number-like entities (e.g. dates, times, ages, medical statistics, locations), so it redacts clinical values unpredictably ("500 mg" always, shorter values sometimes) — usually the opposite of what a medical transcript should keep.',
             key="redact",
         )
         has_input = bool(uploaded_files or recording is not None or url_text.strip())

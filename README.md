@@ -19,7 +19,7 @@ Streamlit application for medical transcription using Deepgram's Nova-3 Medical 
 - **Nova-3 Medical** speech-to-text across eight English variants.
 - **Keyterm prompting** — boost recognition of specialized vocabulary (drug names, procedures).
 - **Speaker diarization** with color-coded per-speaker transcript lines.
-- **Redaction** of PII, PHI, PCI, and numbers for de-identification.
+- **Redaction** — PII for de-identification, plus PHI, PCI, and number groups (PHI and Numbers also strip clinical content).
 - **Smart formatting**, spoken **dictation** commands, and **measurement** abbreviation.
 - **Downloads** — plain-text transcript and timestamped, speaker-labeled **SRT** subtitles.
 - **"Reading room" light & dark themes** — a clinical blue-slate palette with a teal accent that follows your OS light/dark setting (switchable in Settings), WCAG AA throughout in both modes, with self-hosted fonts (no third-party CDN).
@@ -46,7 +46,7 @@ If `DEEPGRAM_API_KEY` is not set, the app prompts for it inline.
 **Select audio** from the input tabs on the left:
 
 - **Upload** — up to 100 audio files (mp3, m4a, wav, flac, ogg; max 200 MB each)
-- **Record** — record from microphone (max 10 minutes)
+- **Record** — record from microphone (max 30 minutes)
 - **URL** — transcribe from HTTP/HTTPS URLs (up to 100 per batch)
 
 A **Features** panel in the left sidebar holds the request options, closed by a **Run** button. If you populate more than one input tab, Run transcribes a single one by priority — **Upload, then Record, then URL** — and shows a notice naming which ran and which were ignored.
@@ -54,10 +54,10 @@ A **Features** panel in the left sidebar holds the request options, closed by a 
 - **Language** — English variants (Nova-3 Medical is English-only)
 - **Keyterm Prompting** — type specialized vocabulary (drug names, procedures, names), Enter to add each, up to 100, to boost recognition
 - **Smart Format** (on by default) — punctuation, paragraph breaks, and entity formatting
-- **Diarize** (off by default) — labels speaker turns as Speaker 1, Speaker 2, … in the transcript (speakers are numbered, not named by role)
-- **Dictation** (off by default) — turns spoken commands like "period" / "new paragraph" into punctuation (also enables punctuation)
-- **Measurements** (off by default) — abbreviates spoken units (e.g. "five milligrams" → "5 mg")
-- **Redact** (none by default) — replaces selected information with redaction tags. Four groups are selectable: **PII** de-identifies (names, locations, IDs); **PHI** removes clinical content itself (conditions, drugs, injuries); **PCI** redacts card numbers; **Numbers** redacts numeric values.
+- **Diarize** (off by default) — labels speaker turns as Speaker 1, Speaker 2, … in the transcript (speakers are numbered, not named by role); use it for clinician–patient encounters
+- **Dictation** (off by default) — turns spoken commands like "period" / "new paragraph" into punctuation (also enables punctuation); for a single clinician dictating, not encounters. Run warns when Dictation and Diarize are both on
+- **Measurements** (off by default) — abbreviates spoken units (e.g. "five milligrams" → "5 mg"). Volumes come out as lowercase "ml" / "l", which [ISMP](https://www.ismp.org/recommendations/error-prone-abbreviations-list) lists as error-prone (use mL / L), so review volumes before clinical use
+- **Redact** (none by default) — replaces selected information with redaction tags. Four groups are selectable: **PII** de-identifies (names, locations, IDs); **PHI** removes clinical content itself (conditions, drugs, injuries); **PCI** redacts card numbers; **Numbers** redacts any run of three or more digits plus Deepgram's number-like entities (e.g. dates, times, ages, phone and account numbers, medical statistics, locations) — so clinical values are redacted unpredictably ("500 mg" always, shorter doses, vitals, and lab values only sometimes).
 
 Once a request runs:
 
