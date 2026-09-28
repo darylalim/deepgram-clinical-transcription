@@ -1,9 +1,10 @@
-from unittest.mock import MagicMock, patch
+import re
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
 import streamlit_app
-from tests.helpers import mock_upload, mock_word, wav_bytes
+from tests.helpers import RUN_ID, mock_upload, mock_word, wav_bytes
 
 FAKE_AUDIO = b"fake-audio-data"
 
@@ -199,6 +200,44 @@ class TestProcessInputs:
         mock_st.toast.assert_called_once()
         assert "fail" in mock_st.toast.call_args.args[0].lower()
         assert mock_st.toast.call_args.kwargs["icon"] == ":material/error:"
+
+    def test_writes_a_fresh_run_id_per_run(self, mock_deepgram_cls, mock_st):
+        # The review widgets key on it, so each Run starts with fresh editors and
+        # unchecked Reviewed boxes.
+        streamlit_app._process_inputs("test-key", [("a.wav", b"a")])
+        first = mock_st.session_state["run_id"]
+        streamlit_app._process_inputs("test-key", [("a.wav", b"a")])
+        second = mock_st.session_state["run_id"]
+
+        assert re.fullmatch(r"[0-9a-f]{32}", first)
+        assert re.fullmatch(r"[0-9a-f]{32}", second)
+        assert first != second
+
+    def test_fully_failed_run_still_rotates_run_id(self, mock_deepgram_cls, mock_st):
+        mock_st.session_state["run_id"] = RUN_ID
+        mock_client = mock_deepgram_cls.return_value
+        mock_client.listen.v1.media.transcribe_file.side_effect = Exception("fail")
+
+        streamlit_app._process_inputs("test-key", [("a.wav", b"a")])
+
+        assert re.fullmatch(r"[0-9a-f]{32}", mock_st.session_state["run_id"])
+        assert mock_st.session_state["run_id"] != RUN_ID
+
+    def test_returns_the_success_count(self, mock_deepgram_cls, mock_st):
+        mock_client = mock_deepgram_cls.return_value
+
+        def fake_transcribe(request, **_):
+            if request == b"bad":
+                raise Exception("boom")
+            return MagicMock()
+
+        mock_client.listen.v1.media.transcribe_file.side_effect = fake_transcribe
+
+        n_ok = streamlit_app._process_inputs(
+            "test-key", [("ok.wav", b"ok"), ("bad.wav", b"bad")]
+        )
+
+        assert n_ok == 1
 
     def test_toast_reports_partial_success(self, mock_deepgram_cls, mock_st):
         mock_client = mock_deepgram_cls.return_value
@@ -629,33 +668,47 @@ class TestLowConfidenceFlags:
 
 
 class TestOutputPanel:
-    """The panel's layout; `_display_transcript` is patched out (tested above)."""
+    """The panel's layout; `_display_transcript` and `_review_controls` are patched
+    out (tested above and below)."""
 
     @pytest.fixture
     def render(self):
         with patch.object(streamlit_app, "_display_transcript") as render:
             yield render
 
-    def test_shows_placeholder_when_empty(self, mock_st, render):
-        streamlit_app._output_panel([], [])
+    @pytest.fixture
+    def controls(self):
+        with patch.object(
+            streamlit_app,
+            "_review_controls",
+            side_effect=lambda *a: (f"text{a[1]}", True),
+        ) as controls:
+            yield controls
+
+    def test_shows_placeholder_when_empty(self, mock_st, render, controls):
+        reviews = streamlit_app._output_panel([], [], RUN_ID)
 
         mock_st.caption.assert_called_once_with(streamlit_app.PLACEHOLDER)
         render.assert_not_called()
+        controls.assert_not_called()
+        assert reviews == []
 
-    def test_single_result_has_player_and_no_divider(self, mock_st, render):
+    def test_single_result_has_player_and_no_divider(self, mock_st, render, controls):
         response = MagicMock()
 
-        streamlit_app._output_panel([("a.mp3", response)], [b"a"])
+        reviews = streamlit_app._output_panel([("a.mp3", response)], [b"a"], RUN_ID)
 
         render.assert_called_once_with(response)
+        controls.assert_called_once_with(RUN_ID, 0, response, 1)
+        assert reviews == [("text0", True)]
         mock_st.audio.assert_called_once()
         mock_st.divider.assert_not_called()
         mock_st.caption.assert_not_called()
 
-    def test_multiple_results_labeled_with_dividers(self, mock_st, render):
+    def test_multiple_results_labeled_with_dividers(self, mock_st, render, controls):
         responses = [("a.mp3", MagicMock()), ("b.mp3", MagicMock())]
 
-        streamlit_app._output_panel(responses, [b"a", b"b"])
+        reviews = streamlit_app._output_panel(responses, [b"a", b"b"], RUN_ID)
 
         assert render.call_count == 2
         assert mock_st.audio.call_count == 2
@@ -663,24 +716,135 @@ class TestOutputPanel:
         labels = [c.args[0] for c in mock_st.markdown.call_args_list]
         assert any("a.mp3" in m for m in labels)
         assert any("b.mp3" in m for m in labels)
+        # One set of review controls per result, by position (never by filename),
+        # and their values come back in result order for the download gate.
+        assert [c.args for c in controls.call_args_list] == [
+            (RUN_ID, 0, responses[0][1], 2),
+            (RUN_ID, 1, responses[1][1], 2),
+        ]
+        assert reviews == [("text0", True), ("text1", True)]
 
-    def test_single_none_source_renders_no_player(self, mock_st, render):
+    def test_single_none_source_renders_no_player(self, mock_st, render, controls):
         response = MagicMock()
 
-        streamlit_app._output_panel([("big.wav", response)], [None])
+        streamlit_app._output_panel([("big.wav", response)], [None], RUN_ID)
 
         mock_st.audio.assert_not_called()
         mock_st.caption.assert_called_once_with(streamlit_app.PLAYBACK_TOO_LARGE)
         render.assert_called_once_with(response)
+        controls.assert_called_once_with(RUN_ID, 0, response, 1)
 
-    def test_none_source_skipped_among_multiple(self, mock_st, render):
+    def test_none_source_skipped_among_multiple(self, mock_st, render, controls):
         responses = [("big.wav", MagicMock()), ("small.wav", MagicMock())]
 
-        streamlit_app._output_panel(responses, [None, b"a"])
+        streamlit_app._output_panel(responses, [None, b"a"], RUN_ID)
 
         mock_st.audio.assert_called_once_with(b"a", format="audio/wav")
         mock_st.caption.assert_called_once_with(streamlit_app.PLAYBACK_TOO_LARGE)
         assert render.call_count == 2
+        assert controls.call_count == 2
+
+
+class TestReviewControls:
+    """The per-result export editor and Reviewed checkbox, and their callbacks."""
+
+    def test_editor_is_seeded_with_the_plain_transcript(
+        self, mock_deepgram_cls, mock_st
+    ):
+        response = (
+            mock_deepgram_cls.return_value.listen.v1.media.transcribe_file.return_value
+        )
+
+        streamlit_app._review_controls(RUN_ID, 0, response, 1)
+
+        mock_st.text_area.assert_called_once_with(
+            streamlit_app.EDIT_LABEL,
+            value=streamlit_app._plain_transcript(response),
+            key=f"transcript_{RUN_ID}_0",
+            height="content",
+            help=streamlit_app.EDIT_HELP,
+            on_change=streamlit_app._on_edit,
+            args=(RUN_ID, 0),
+            disabled=False,
+        )
+
+    def test_checkbox_is_keyed_by_run_and_position(self, mock_st):
+        streamlit_app._review_controls(RUN_ID, 0, MagicMock(), 1)
+
+        # No value= — the checkbox's state lives only under its key.
+        mock_st.checkbox.assert_called_once_with(
+            streamlit_app.REVIEWED_LABEL,
+            key=f"reviewed_{RUN_ID}_0",
+            on_change=streamlit_app._on_review,
+            args=(RUN_ID, 0),
+        )
+
+    def test_editor_is_disabled_once_reviewed(self, mock_st):
+        # Signed-off text is frozen: unchecking Reviewed is the only way to edit it.
+        mock_st.session_state[f"reviewed_{RUN_ID}_0"] = True
+
+        streamlit_app._review_controls(RUN_ID, 0, MagicMock(), 1)
+
+        assert mock_st.text_area.call_args.kwargs["disabled"] is True
+
+    def test_truthy_non_true_flag_does_not_count_as_reviewed(self, mock_st):
+        mock_st.session_state[f"reviewed_{RUN_ID}_0"] = "yes"
+        mock_st.checkbox.return_value = 1
+
+        _, reviewed = streamlit_app._review_controls(RUN_ID, 0, MagicMock(), 1)
+
+        assert mock_st.text_area.call_args.kwargs["disabled"] is False
+        assert reviewed is False
+
+    def test_returns_the_widget_values(self, mock_st):
+        mock_st.text_area.return_value = "Edited text."
+        mock_st.checkbox.return_value = True
+
+        result = streamlit_app._review_controls(RUN_ID, 0, MagicMock(), 1)
+
+        assert result == ("Edited text.", True)
+
+    def test_multi_result_labels_carry_position_not_filename(self, mock_st):
+        streamlit_app._review_controls(RUN_ID, 1, MagicMock(), 3)
+
+        assert (
+            mock_st.text_area.call_args.args[0]
+            == f"{streamlit_app.EDIT_LABEL} (2 of 3)"
+        )
+        assert (
+            mock_st.checkbox.call_args.args[0]
+            == f"{streamlit_app.REVIEWED_LABEL} (2 of 3)"
+        )
+        assert mock_st.text_area.call_args.kwargs["key"] == f"transcript_{RUN_ID}_1"
+        assert mock_st.checkbox.call_args.kwargs["key"] == f"reviewed_{RUN_ID}_1"
+
+    def test_on_edit_clears_a_set_flag(self, mock_st):
+        mock_st.session_state[f"reviewed_{RUN_ID}_0"] = True
+
+        streamlit_app._on_edit(RUN_ID, 0)
+
+        assert mock_st.session_state[f"reviewed_{RUN_ID}_0"] is False
+
+    def test_on_edit_leaves_an_unset_flag_untouched(self, mock_st):
+        mock_st.session_state[f"reviewed_{RUN_ID}_1"] = False
+
+        streamlit_app._on_edit(RUN_ID, 0)
+        streamlit_app._on_edit(RUN_ID, 1)
+
+        assert f"reviewed_{RUN_ID}_0" not in mock_st.session_state
+        assert mock_st.session_state[f"reviewed_{RUN_ID}_1"] is False
+
+    def test_on_review_changes_nothing(self, mock_st):
+        mock_st.session_state[f"reviewed_{RUN_ID}_0"] = True
+
+        streamlit_app._on_review(RUN_ID, 0)
+
+        assert mock_st.session_state == {f"reviewed_{RUN_ID}_0": True}
+
+    def test_edit_help_explains_export_apply_and_unlock(self):
+        assert "Download saves" in streamlit_app.EDIT_HELP
+        assert "Ctrl/⌘+Enter" in streamlit_app.EDIT_HELP
+        assert "uncheck Reviewed to edit again" in streamlit_app.EDIT_HELP
 
 
 class TestFeatureOpts:
@@ -790,29 +954,132 @@ class TestMetrics:
 
 
 class TestTranscriptDownload:
-    """The plain-text transcript download button above the output panel."""
+    """The review-gated plain-text download button above the output panel.
+
+    `_transcript_download` takes each result's `(editor text, reviewed)` pair as the
+    review widgets returned them this run (see TestReviewControls)."""
+
+    @staticmethod
+    def _call_kwargs(mock_st):
+        mock_st.download_button.assert_called_once()
+        return mock_st.download_button.call_args
 
     def test_no_button_when_no_responses(self, mock_st):
-        streamlit_app._transcript_download([])
+        streamlit_app._transcript_download([], [])
 
         mock_st.download_button.assert_not_called()
 
-    def test_button_carries_transcript_text(self, mock_deepgram_cls, mock_st):
+    def test_locked_until_reviewed_and_carries_no_transcript(
+        self, mock_deepgram_cls, mock_st
+    ):
+        response = (
+            mock_deepgram_cls.return_value.listen.v1.media.transcribe_file.return_value
+        )
+        text = streamlit_app._plain_transcript(response)
+
+        streamlit_app._transcript_download([("a.wav", response)], [(text, False)])
+
+        call = self._call_kwargs(mock_st)
+        assert call.args == ("Download locked — 0/1 reviewed", "")
+        assert call.kwargs["disabled"] is True
+        assert call.kwargs["help"] == streamlit_app.DOWNLOAD_LOCKED_HELP
+        assert call.kwargs["key"] == "download_transcripts"
+        # The server-side half of the gate: no transcript text (and no callable that
+        # could produce one) is registered while any result is unreviewed.
+        assert text not in repr(call)
+        assert not any(callable(a) for a in call.args)
+
+    def test_one_unreviewed_result_of_two_keeps_it_locked(self, mock_st):
+        responses = [("a.wav", MagicMock()), ("b.wav", MagicMock())]
+
+        streamlit_app._transcript_download(
+            responses, [("Alpha.", True), ("Beta.", False)]
+        )
+
+        call = self._call_kwargs(mock_st)
+        assert call.args == ("Download locked — 1/2 reviewed", "")
+        assert call.kwargs["disabled"] is True
+        assert "Alpha." not in repr(call)
+
+    def test_missing_review_state_keeps_it_locked(self, mock_st):
+        # Defensive: fewer review pairs than results never unlocks.
+        responses = [("a.wav", MagicMock()), ("b.wav", MagicMock())]
+
+        streamlit_app._transcript_download(responses, [("Alpha.", True)])
+
+        call = self._call_kwargs(mock_st)
+        assert call.args[1] == ""
+        assert call.kwargs["disabled"] is True
+
+    def test_unlocked_exports_the_edited_text(self, mock_deepgram_cls, mock_st):
         response = (
             mock_deepgram_cls.return_value.listen.v1.media.transcribe_file.return_value
         )
 
-        streamlit_app._transcript_download([("a.wav", response)])
+        streamlit_app._transcript_download(
+            [("a.wav", response)], [("Life moves pretty fast, really.", True)]
+        )
 
-        mock_st.download_button.assert_called_once()
-        build_transcript = mock_st.download_button.call_args.args[1]
-        assert callable(build_transcript)  # deferred: built on click, not per rerun
-        text = build_transcript()
-        assert "a.wav" in text
-        assert "Life moves pretty fast really." in text
+        call = self._call_kwargs(mock_st)
+        label, build = call.args
+        assert label == streamlit_app.DOWNLOAD_LABEL
+        assert call.kwargs == {
+            "file_name": "transcripts.txt",
+            "mime": "text/plain",
+            "icon": ":material/download:",
+            "key": "download_transcripts",
+            "disabled": False,
+            "help": None,
+            "on_click": "ignore",
+        }
+        assert callable(build)  # deferred: built on click, not per rerun
+        # The editor's text — not Deepgram's original — is what gets saved.
+        assert build() == "a.wav\nLife moves pretty fast, really."
+
+    def test_unedited_result_exports_the_plain_transcript(
+        self, mock_deepgram_cls, mock_st
+    ):
+        # End to end through the review controls: an untouched editor returns its
+        # seed, so the export is the plain transcript.
+        response = (
+            mock_deepgram_cls.return_value.listen.v1.media.transcribe_file.return_value
+        )
+        mock_st.text_area.side_effect = lambda label, value, **_: value
+        mock_st.checkbox.return_value = True
+
+        review = streamlit_app._review_controls(RUN_ID, 0, response, 1)
+        streamlit_app._transcript_download([("a.wav", response)], [review])
+
+        build = mock_st.download_button.call_args.args[1]
+        assert build() == "a.wav\nLife moves pretty fast really."
+
+    def test_multiple_results_combined_into_one_file(self, mock_st):
+        responses = [("a.wav", MagicMock()), ("b.wav", MagicMock())]
+
+        streamlit_app._transcript_download(
+            responses, [("Alpha, edited.", True), ("Beta.", True)]
+        )
+
+        build = mock_st.download_button.call_args.args[1]
+        assert build() == "a.wav\nAlpha, edited.\n\nb.wav\nBeta."
+
+    def test_deferred_export_uses_render_time_text_and_no_st(self, mock_st):
+        # Streamlit runs the callable on click, on a worker thread with no
+        # ScriptRunContext: it must return the text captured at render and never
+        # touch `st.*` (a spec=[] Mock raises on any attribute access).
+        reviews = [("Reviewed text.", True)]
+        mock_st.session_state[f"transcript_{RUN_ID}_0"] = "Reviewed text."
+        streamlit_app._transcript_download([("a.wav", MagicMock())], reviews)
+        build = mock_st.download_button.call_args.args[1]
+
+        reviews[0] = ("Changed after render.", True)
+        mock_st.session_state[f"transcript_{RUN_ID}_0"] = "Changed after render."
+        with patch.object(streamlit_app, "st", Mock(spec=[])):
+            assert build() == "a.wav\nReviewed text."
 
     def test_diarized_export_uses_plain_speaker_lines(self):
-        # The export is plain text (no color directives): "Speaker N: ..." per turn.
+        # The editor's seed is plain text (no color directives): "Speaker N: ..."
+        # per turn.
         words = [
             mock_word("Hello.", 0.9, speaker=0),
             mock_word("Hi.", 0.9, speaker=1),
@@ -824,25 +1091,6 @@ class TestTranscriptDownload:
             streamlit_app._plain_transcript(response)
             == "Speaker 1: Hello.\nSpeaker 2: Hi."
         )
-
-    def test_multiple_results_combined_into_one_file(self, mock_st):
-        # A multi-result batch exports one combined plain-text file (both present).
-        def _diarized(token):
-            words = [mock_word(token, 0.9, speaker=0)]
-            response = MagicMock()
-            response.results.channels = [
-                MagicMock(alternatives=[MagicMock(words=words)])
-            ]
-            return response
-
-        streamlit_app._transcript_download(
-            [("a.wav", _diarized("Alpha.")), ("b.wav", _diarized("Beta."))]
-        )
-
-        mock_st.download_button.assert_called_once()
-        combined = mock_st.download_button.call_args.args[1]()
-        assert "a.wav" in combined and "b.wav" in combined
-        assert "Alpha." in combined and "Beta." in combined
 
 
 class TestSecretApiKey:
@@ -879,17 +1127,23 @@ class TestAppSmoke:
 
     - **empty state** — module load (``set_page_config`` ordering, the ``st.form``
       structure, the output fragment) plus the idle UI: the placeholder caption, a
-      disabled Run button, the inputs | output column split, and the Features control
-      order
+      disabled Run button, no review controls or download row, the inputs | output
+      column split, and the Features control order
       (``language, keyterms, smart_format, diarize, dictation, measurements, redact``).
     - **seeded diarized** — renders the transcript panel for a diarized result,
       asserting the exact 1-based color-directive speaker lines, the
       Duration/Confidence/Low-confidence words metric cards, the nothing-flagged
-      caption, and the dropped-playback caption (the ``download_button`` icon also
-      runs here).
+      caption, and the dropped-playback caption; then walks the **review gate**:
+      Download locked (no deferred file registered) until Reviewed is checked; an
+      applied edit exported in place of Deepgram's text; the reviewed editor frozen
+      (kept across a rerun, refusing input, and dropping a forged value — with an
+      enabled-editor control); unchecking re-locks; an edit + check in one rerun
+      leaves it unchecked; and a new ``run_id`` reseeds everything and purges the old
+      keys. Deferred ``data`` callables are recorded via ``MediaFileManager.
+      add_deferred``, since AppTest never executes them.
     - **seeded flat** — the non-diarized render branch: an escaped transcript with
       no speaker labels, its one low-confidence word in bold orange under the legend
-      caption.
+      caption, and a plain-text editor seed.
     - **no-key state** — clears ``DEEPGRAM_API_KEY`` so the key-required warning and
       the API-Key input render.
 
@@ -913,14 +1167,45 @@ class TestAppSmoke:
 import os
 import sys
 from unittest.mock import MagicMock
+from streamlit.runtime.media_file_manager import MediaFileManager
 from streamlit.testing.v1 import AppTest
 from streamlit.testing.v1.element_tree import Block
+from streamlit.testing.v1.errors import AppTestError
+
+from tests.helpers import RUN_ID
 
 app = sys.argv[1]
 
 # Seed a key so the first three runs are deterministic regardless of a local .env
 # (load_dotenv does not override an already-set var); run #4 clears it.
 os.environ["DEEPGRAM_API_KEY"] = "test-key"
+
+# AppTest never executes a download button's deferred `data` callable (only the
+# browser's click path does), so record each one as Streamlit registers it; a test
+# can then call it by the button's `deferred_file_id` to see what would be saved.
+deferred = {}
+_add_deferred = MediaFileManager.add_deferred
+
+
+def _record_deferred(self, data_callable, *args, **kwargs):
+    file_id = _add_deferred(self, data_callable, *args, **kwargs)
+    deferred[file_id] = data_callable
+    return file_id
+
+
+MediaFileManager.add_deferred = _record_deferred
+
+
+def _export(at):
+    return deferred[at.download_button[0].proto.deferred_file_id]()
+
+
+def _forge(widget, value):
+    # Queue a value the browser could not send: AppTest's public .input() refuses a
+    # disabled widget, so set its pending value directly (private attribute; the
+    # enabled-editor control case below proves the forge still reaches the server).
+    assert hasattr(widget, "_value"), "AppTest renamed Widget._value"
+    widget._value = value
 
 
 def _word(text, speaker, confidence=0.9):
@@ -964,6 +1249,8 @@ assert run and run[0].disabled, "Run should be disabled with no audio input"
 # Key was seeded, so no api-key warning fires — this pins the disable to the
 # no-input branch (`not has_input`), not the no-key branch (`not api_key`).
 assert not at.warning, [w.value for w in at.warning]
+# No results, so no review controls and no download row.
+assert not at.text_area and not at.checkbox and not at.download_button
 
 # Main area is a side-by-side split: the audio input tabs on the left; on the right the
 # output panel under its Transcript caption header (no output tabs) with its
@@ -1000,6 +1287,7 @@ diar = _resp("Hello. Hi.", [_word("Hello.", 0), _word("Hi.", 1)], 3.5, 0.95)
 seeded = AppTest.from_file(app, default_timeout=30)
 seeded.session_state["responses"] = [("sample.wav", diar)]
 seeded.session_state["audio_sources"] = [None]
+seeded.session_state["run_id"] = RUN_ID
 seeded.run()
 assert not seeded.exception, seeded.exception
 assert [m.value for m in seeded.markdown] == [
@@ -1011,6 +1299,76 @@ assert [m.value for m in seeded.metric] == ["3.5 s", "95.0%", "0"]
 assert any("No words scored below 90%" in c.value for c in seeded.caption), [c.value for c in seeded.caption]
 assert any("Inline playback unavailable" in c.value for c in seeded.caption)
 
+# 2b) Review / sign-off on the same result. The editor is seeded with the plain
+#     transcript, and Download stays locked — registering no transcript at all —
+#     until the result is marked reviewed.
+SEED = "Speaker 1: Hello.\\nSpeaker 2: Hi."
+EDITED = "Speaker 1: Hello.\\nSpeaker 2: Hi there."
+assert [t.label for t in seeded.text_area] == ["Transcript to export"]
+assert seeded.text_area[0].key == "transcript_" + RUN_ID + "_0"
+assert seeded.text_area[0].value == SEED and not seeded.text_area[0].disabled
+assert [c.label for c in seeded.checkbox] == ["Reviewed against the audio"]
+assert seeded.checkbox[0].value is False
+dl = seeded.download_button[0]
+assert dl.disabled and "Reviewed" in dl.help, (dl.disabled, dl.help)
+assert dl.label == "Download locked — 0/1 reviewed", dl.label
+assert not dl.proto.deferred_file_id  # data="" while locked: nothing to fetch
+
+# An applied edit leaves it unreviewed; checking Reviewed unlocks Download and
+# freezes the editor, and the export is the edited text, not Deepgram's.
+seeded.text_area[0].input(EDITED).run()
+assert not seeded.exception, seeded.exception
+assert seeded.checkbox[0].value is False and seeded.download_button[0].disabled
+seeded.checkbox[0].check().run()
+assert not seeded.exception, seeded.exception
+dl = seeded.download_button[0]
+assert not dl.disabled and dl.label == "Download transcript" and not dl.help
+assert seeded.text_area[0].disabled
+assert _export(seeded) == "sample.wav\\n" + EDITED
+
+# The frozen editor keeps its edited value across a rerun, and the export uses it.
+seeded.run()
+assert seeded.text_area[0].value == EDITED and seeded.text_area[0].disabled
+assert _export(seeded) == "sample.wav\\n" + EDITED
+try:
+    seeded.text_area[0].input("typed after sign-off")
+    raise AssertionError("a reviewed editor accepted input")
+except AppTestError:
+    pass  # a browser user cannot type into it either
+
+# A value for the frozen editor that arrives anyway (a stale UI's late edit, or a
+# forged message) is dropped server-side — and never reaches the export, because
+# the gate reads the widget's own return value, not its session-state key.
+_forge(seeded.text_area[0], "FORGED")
+seeded.run()
+assert not seeded.exception, seeded.exception
+assert seeded.text_area[0].value == EDITED and seeded.checkbox[0].value is True
+assert _export(seeded) == "sample.wav\\n" + EDITED
+
+# Unchecking reopens the editor and re-locks Download; the same forge on the now
+# enabled editor does land (the control proving the case above was not vacuous).
+seeded.checkbox[0].uncheck().run()
+assert not seeded.text_area[0].disabled and seeded.download_button[0].disabled
+_forge(seeded.text_area[0], "CONTROL")
+seeded.run()
+assert seeded.text_area[0].value == "CONTROL", seeded.text_area[0].value
+
+# An edit and a check landing in the same rerun: the edit clears the check.
+seeded.text_area[0].input(EDITED)
+seeded.checkbox[0].check()
+seeded.run()
+assert not seeded.exception, seeded.exception
+assert seeded.checkbox[0].value is False and seeded.download_button[0].disabled
+
+# A new Run (a full rerun under a new run_id) starts over: a freshly seeded,
+# editable editor, an unchecked box, and the old run's keys purged.
+seeded.session_state["run_id"] = "1" * 32
+seeded.run()
+assert not seeded.exception, seeded.exception
+assert seeded.text_area[0].value == SEED and seeded.checkbox[0].value is False
+assert "transcript_" + RUN_ID + "_0" not in seeded.session_state
+assert "reviewed_" + RUN_ID + "_0" not in seeded.session_state
+
 # 3) Seeded flat (non-diarized) result — the other render branch: an escaped
 #    transcript with no speaker labels, rebuilt from its words so the one
 #    low-confidence word renders in bold orange under the legend caption.
@@ -1019,12 +1377,15 @@ flat = _resp("Patient is stable.", flat_words, 12.0, 0.88)
 flat_at = AppTest.from_file(app, default_timeout=30)
 flat_at.session_state["responses"] = [("note.wav", flat)]
 flat_at.session_state["audio_sources"] = [None]
+flat_at.session_state["run_id"] = RUN_ID
 flat_at.run()
 assert not flat_at.exception, flat_at.exception
 assert [m.value for m in flat_at.markdown] == ["Patient is :orange[**stable.**]"]
 assert not any("Speaker" in m.value for m in flat_at.markdown)
 assert any("bold orange" in c.value for c in flat_at.caption), [c.value for c in flat_at.caption]
 assert [m.value for m in flat_at.metric][-1] == "1"
+# The editor holds the plain text — no flag markup reaches what gets exported.
+assert flat_at.text_area[0].value == "Patient is stable."
 
 # 4) No-key state — clear the key, no-op load_dotenv, and empty the secrets search
 #    path, so neither a local .env nor a developer's ~/.streamlit/secrets.toml can

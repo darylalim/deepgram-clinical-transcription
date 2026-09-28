@@ -82,7 +82,14 @@ codeBackgroundColor = "#1B2329"      # code blocks match the widget surface
 textColor = "#E3E9ED"                # body 14.75:1 on canvas; captions (60%) 5.96:1
 codeTextColor = "#C3CED6"            # code sits a step quieter than body text (9.95:1)
 linkColor = "#6EB3EA"                # conventional link blue, 8.00:1 on canvas
-borderColor = "#36434D"              # widget borders — visible edge without busy outlines
+# Widget and container borders — including the unchecked "Reviewed against the audio"
+# checkbox, whose outline is the ONLY thing that shows it: WCAG 1.4.11 needs 3:1
+# against the canvas, which the previous #36434D missed (1.78:1). #546878 is 3.12:1 on
+# the canvas — COMPUTED, NOT YET MEASURED IN-BROWSER. A checked box fills with
+# primaryColor (6.98:1); its white tick is not relied on. The sidebar keeps its own,
+# softer borderColor (below): the change is scoped to the main area, where the
+# checkbox renders.
+borderColor = "#546878"
 
 # Accent — clinical teal, SPLIT BY ZONE in this mode only. Streamlit hardcodes the
 # label of a type="primary" button white (no `primaryTextColor` exists), and on this
@@ -145,7 +152,10 @@ textColor = "#0F171C"                # slate ink, 18.11:1 — darker than it nee
 # (e.g. #18232A) drops them to 4.19:1 on the sidebar. At #0F171C they hold 4.63:1.
 codeTextColor = "#2B3A44"            # 10.50:1 on the code surface
 linkColor = "#1F6FB8"                # 5.22:1 on canvas
-borderColor = "#C8D2D9"
+# Raised for the unchecked Reviewed checkbox (WCAG 1.4.11, 3:1 on the canvas; the
+# previous #C8D2D9 was 1.54:1): #7E95A5 is 3.12:1 on white — COMPUTED, NOT YET
+# MEASURED IN-BROWSER. A checked box fills with primaryColor (5.76:1).
+borderColor = "#7E95A5"
 
 # Accent — ONE teal. On a light canvas the constraints that force the dark-mode split
 # coincide: a teal dark enough to carry the white Run label is automatically dark

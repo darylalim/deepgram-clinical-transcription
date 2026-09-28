@@ -1,7 +1,9 @@
 import io
 import os
 import re
+import uuid
 import wave
+from collections.abc import Callable
 from concurrent.futures import as_completed
 from typing import Any
 
@@ -49,6 +51,9 @@ MAX_PLAYBACK_BYTES = 25 * 1024 * 1024  # larger uploads skip inline playback (me
 # scroll nested around the panel's own scroll. Measured when a tab strip sat above the
 # panel; the caption header that replaced it is shorter, so the panel still clears the
 # fold. Streamlit has no viewport-relative height, so a fixed value is the only option.
+# The review editor and Reviewed checkbox render inside the panel's scroll container,
+# so they add nothing above it (a long transcript then scrolls through twice: the
+# highlighted view, then the editor).
 OUTPUT_HEIGHT = 480
 INPUT_OUTPUT_RATIO = (2, 3)  # main-area column widths: audio inputs | output panel
 
@@ -123,15 +128,16 @@ def _transcribe_batch(
     items: list[tuple[str, dict[str, Any]]],
     method: str,
     **opts: Any,
-):
+) -> int:
     """Transcribe a batch via the shared core, owning the Streamlit-side concerns.
 
     Thin UI adapter over `nova.transcribe.transcribe_batch`: it builds the playback
     sources up front, drives a live `st.status` progress region (label + bar), renders
-    one `st.error` per failed item, writes results to session state, and fires a
-    completion `st.toast`. `**opts` is the `_feature_opts` dict (its keys match
-    `build_options` exactly); the module-global `DeepgramClient`/`as_completed` are
-    passed as seams so the existing test patch points keep intercepting them.
+    one `st.error` per failed item, writes results to session state under a fresh
+    `run_id`, and fires a completion `st.toast`. Returns the number of successful
+    items. `**opts` is the `_feature_opts` dict (its keys match `build_options`
+    exactly); the module-global `DeepgramClient`/`as_completed` are passed as seams so
+    the existing test patch points keep intercepting them.
     """
     options = build_options(**opts)
     total = len(items)
@@ -170,14 +176,20 @@ def _transcribe_batch(
     # Always overwrite (even when empty) so a fully-failed run clears stale results.
     st.session_state["responses"] = [(r.label, r.response) for r in ok]
     st.session_state["audio_sources"] = [sources[r.index] for r in ok]
+    # A fresh id per Run — also unconditional, so a fully-failed run rotates it too.
+    # The review widgets key on it, so a new batch starts with fresh editors and
+    # unchecked Reviewed boxes (Streamlit purges the old run's keys at the end of
+    # this full rerun, since nothing renders them again).
+    st.session_state["run_id"] = uuid.uuid4().hex
 
     _completion_toast(len(ok), total)
+    return len(ok)
 
 
-def _process_inputs(api_key: str, files: list[tuple[str, bytes]], **opts) -> None:
-    """Transcribe files with a shared client and store results in session state."""
+def _process_inputs(api_key: str, files: list[tuple[str, bytes]], **opts) -> int:
+    """Transcribe files with a shared client, store results; return the success count."""
     items = [(name, {"request": data}) for name, data in files]
-    _transcribe_batch(api_key, items, "transcribe_file", **opts)
+    return _transcribe_batch(api_key, items, "transcribe_file", **opts)
 
 
 def _feature_opts() -> dict[str, Any]:
@@ -355,45 +367,159 @@ def _plain_transcript(response: Any) -> str:
     return _transcript_text(response) or ""
 
 
-def _transcript_download(responses: list[tuple[str, Any]]) -> None:
-    """Plain-text download button for the whole batch's transcripts.
+# Review / sign-off. Widget keys carry only the run id and the result's position —
+# never a filename, since a key becomes an `st-key-*` class in the page's DOM.
+def _text_key(run_id: str, index: int) -> str:
+    """Session-state key of result `index`'s export editor (a `st.text_area`)."""
+    return f"transcript_{run_id}_{index}"
 
-    The blob is built lazily via a zero-arg `data` callable, so it is only assembled
-    when the user actually clicks — not on every output-fragment rerun.
+
+def _reviewed_key(run_id: str, index: int) -> str:
+    """Session-state key of result `index`'s "Reviewed" checkbox."""
+    return f"reviewed_{run_id}_{index}"
+
+
+def _is_reviewed(run_id: str, index: int) -> bool:
+    """True only when the checkbox value is exactly True (identity, not truthiness)."""
+    return st.session_state.get(_reviewed_key(run_id, index)) is True
+
+
+def _export_blob(named_texts: list[tuple[str, str]]) -> str:
+    """The downloaded file: one `name` line then its text per result, blank-line separated."""
+    return "\n\n".join(f"{name}\n{text}" for name, text in named_texts)
+
+
+def _deferred_export(named_texts: list[tuple[str, str]]) -> Callable[[], str]:
+    """Zero-arg `data` callable for the download button, over texts captured now.
+
+    Streamlit runs it only on click, on a worker thread with no ScriptRunContext, so
+    it must never touch `st.*` (session state included): it closes over plain strings
+    captured at render. It also must not raise — Streamlit logs a failing callable
+    with its traceback, which could carry transcript text.
+    """
+    captured = [(str(name), str(text)) for name, text in named_texts]
+
+    def _build() -> str:
+        return _export_blob(captured)
+
+    return _build
+
+
+def _on_edit(run_id: str, index: int) -> None:
+    """Editor `on_change`: an applied edit clears that result's Reviewed flag.
+
+    Defensive: while Reviewed is checked the editor renders disabled, and Streamlit
+    then discards any incoming value and skips this callback. It fires with the flag
+    set only when an edit and a check land in the same rerun — the check is then
+    undone, failing toward review.
+    """
+    key = _reviewed_key(run_id, index)
+    if st.session_state.get(key) is True:
+        st.session_state[key] = False
+
+
+def _on_review(run_id: str, index: int) -> None:
+    """Reviewed-checkbox `on_change`. Deliberately a no-op for now: it is wired so
+    its signature is stable when the audit trail hooks sign-off here."""
+
+
+def _review_controls(
+    run_id: str, index: int, response: Any, total: int
+) -> tuple[str, bool]:
+    """The export editor and its Reviewed checkbox for one result; returns both values.
+
+    The editor is seeded (via `value=`, never session state) with the plain
+    transcript and holds what Download saves. It renders disabled while Reviewed is
+    checked, so no edit can be typed after sign-off and then miss the download
+    (a text area commits only on blur or Ctrl/⌘+Enter); a disabled widget stays
+    registered, so it keeps its value. Both always render — an unrendered keyed
+    widget loses its value. With several results, labels carry the position (never
+    the filename).
+
+    Returns `(text, reviewed)` from the widgets themselves, which the download gate
+    must use rather than reading the keys from session state before they render:
+    Streamlit drops an incoming value for a disabled widget (a stale UI's late edit,
+    or a forged message) only when the widget registers, so a read taken above it
+    would still see that unreviewed text.
+    """
+    position = f" ({index + 1} of {total})" if total > 1 else ""
+    text = st.text_area(
+        f"{EDIT_LABEL}{position}",
+        value=_plain_transcript(response),
+        key=_text_key(run_id, index),
+        height="content",
+        help=EDIT_HELP,
+        on_change=_on_edit,
+        args=(run_id, index),
+        disabled=_is_reviewed(run_id, index),
+    )
+    reviewed = st.checkbox(
+        f"{REVIEWED_LABEL}{position}",
+        key=_reviewed_key(run_id, index),
+        on_change=_on_review,
+        args=(run_id, index),
+    )
+    return text, reviewed is True
+
+
+def _transcript_download(
+    responses: list[tuple[str, Any]], reviews: list[tuple[str, bool]]
+) -> None:
+    """Plain-text download of the batch's edited transcripts, gated on review.
+
+    `reviews` holds each result's `(editor text, reviewed)` as `_review_controls`
+    returned them this run. Locked until every result is reviewed, with the label
+    showing progress. While locked the button carries `data=""`, not the
+    transcripts: `disabled` is enforced only in the browser on the deferred-file
+    path, so this is the server-side half of the gate. Unlocked, the blob is a
+    deferred callable over the editors' text captured at this render (assembled only
+    on click), and `on_click="ignore"` skips the pointless rerun a click would
+    otherwise trigger.
     """
     if not responses:
         return
-
-    def _build_transcript() -> str:
-        blocks = [f"{name}\n{_plain_transcript(r)}" for name, r in responses]
-        return "\n\n".join(blocks)
-
+    n = len(responses)
+    done = sum(1 for _, reviewed in reviews if reviewed is True)
+    unlocked = len(reviews) == n and done == n
+    data: Callable[[], str] | str = ""
+    if unlocked:
+        names = [name for name, _ in responses]
+        texts = [text for text, _ in reviews]
+        data = _deferred_export(list(zip(names, texts, strict=True)))
     st.download_button(
-        "Download transcript",
-        _build_transcript,
+        DOWNLOAD_LABEL if unlocked else f"Download locked — {done}/{n} reviewed",
+        data,
         file_name="transcripts.txt",
         mime="text/plain",
         icon=":material/download:",
+        key="download_transcripts",
+        disabled=not unlocked,
+        help=None if unlocked else DOWNLOAD_LOCKED_HELP,
+        on_click="ignore",
     )
 
 
 def _output_panel(
     responses: list[tuple[str, Any]],
     audio_sources: list[bytes | None],
-) -> None:
-    """Render results in a fixed-height panel.
+    run_id: str,
+) -> list[tuple[str, bool]]:
+    """Render results in a fixed-height panel; return each result's review state.
 
     Empty -> placeholder. Single result -> player pinned above the scroll container.
     Multiple -> one labeled, divided block per result inside the container. A source
     of None (a large upload dropped from playback) renders a caption in place of the
-    player.
+    player. Each result's highlighted view is followed by its review controls, whose
+    `(text, reviewed)` values are returned in result order (empty when there are no
+    results).
     """
     if not responses:
         with st.container(height=OUTPUT_HEIGHT, border=True):
             st.caption(PLACEHOLDER)
-        return
+        return []
 
-    if len(responses) == 1:
+    total = len(responses)
+    if total == 1:
         (name, response), source = responses[0], audio_sources[0]
         if source is not None:
             _display_audio(name, source)
@@ -401,8 +527,9 @@ def _output_panel(
             st.caption(PLAYBACK_TOO_LARGE)
         with st.container(height=OUTPUT_HEIGHT, border=True):
             _display_transcript(response)
-        return
+            return [_review_controls(run_id, 0, response, total)]
 
+    reviews = []
     with st.container(height=OUTPUT_HEIGHT, border=True):
         for i, ((name, response), source) in enumerate(
             zip(responses, audio_sources, strict=True)
@@ -415,6 +542,8 @@ def _output_panel(
             else:
                 st.caption(PLAYBACK_TOO_LARGE)
             _display_transcript(response)
+            reviews.append(_review_controls(run_id, i, response, total))
+    return reviews
 
 
 PLACEHOLDER = ":material/graphic_eq: Select audio, then click Run in the sidebar to see the response here."
@@ -435,22 +564,40 @@ NO_CONFIDENCE = (
     "review every word against the audio."
 )
 PLAYBACK_TOO_LARGE = "Inline playback unavailable for files over 25 MB."
+# Review / sign-off copy. The editor (not the highlighted view) is what Download saves.
+EDIT_LABEL = "Transcript to export"
+EDIT_HELP = (
+    "Correct errors here — this text, not the highlighted view above, is what "
+    "Download saves. Click away or press Ctrl/⌘+Enter to apply an edit. "
+    "Checking Reviewed locks this text; uncheck Reviewed to edit again."
+)
+REVIEWED_LABEL = "Reviewed against the audio"
+DOWNLOAD_LABEL = "Download transcript"
+DOWNLOAD_LOCKED_HELP = (
+    'Mark every transcript "Reviewed against the audio" to enable download.'
+)
 
 
 @st.fragment
 def _render_output() -> None:
     """Render the transcript output (header, download button, panel) as a fragment.
 
-    Wrapped in `st.fragment` so a download-button click reruns only this panel — not
-    the whole script (the input tabs and the Features form). Results are read from
-    session state, so each fragment rerun reflects the latest batch; a Run (in the
-    Features form, outside this fragment) triggers a full rerun that refreshes it.
+    Wrapped in `st.fragment` so a review interaction (an applied edit, a Reviewed
+    check) reruns only this panel — not the whole script (the input tabs and the
+    Features form). Results are read from session state, so each fragment rerun
+    reflects the latest batch; a Run (in the Features form, outside this fragment)
+    triggers a full rerun that refreshes it under a new `run_id`.
     """
     responses = st.session_state.get("responses", [])
     audio_sources = st.session_state.get("audio_sources", [])
+    run_id = st.session_state.get("run_id", "")
     st.caption(":material/description: Transcript")
-    _transcript_download(responses)
-    _output_panel(responses, audio_sources)
+    # The download row sits above the panel but is filled after it: the gate reads
+    # the review widgets' own return values, which exist only once they render.
+    download_row = st.empty()
+    reviews = _output_panel(responses, audio_sources, run_id)
+    with download_row:
+        _transcript_download(responses, reviews)
 
 
 st.set_page_config(

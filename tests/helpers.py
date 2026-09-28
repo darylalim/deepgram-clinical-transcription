@@ -2,6 +2,10 @@ import io
 import wave
 from unittest.mock import MagicMock
 
+# A fixed, well-formed run id (32 lowercase hex, the shape `uuid.uuid4().hex` gives) for
+# tests that seed or assert the per-Run review widget keys.
+RUN_ID = "0" * 32
+
 
 def mock_word(text: str, confidence: float, speaker: int | None = None):
     w = MagicMock()

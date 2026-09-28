@@ -20,9 +20,10 @@ Streamlit application for medical transcription using Deepgram's Nova-3 Medical 
 - **Keyterm prompting** — boost recognition of specialized vocabulary (drug names, procedures).
 - **Speaker diarization** with color-coded per-speaker transcript lines.
 - **Low-confidence flags** — words Deepgram scored below 90% confidence are shown in **bold orange**, with a per-result count, so review starts where the model was least sure.
+- **Review and sign-off** — each result gets an editor holding the text to export; correct it against the audio, then mark it **Reviewed against the audio**, which freezes it.
 - **Redaction** — PII for de-identification, plus PHI, PCI, and number groups (PHI and Numbers also strip clinical content).
 - **Smart formatting**, spoken **dictation** commands, and **measurement** abbreviation.
-- **Download** — the transcript as plain text (`.txt`), with a multi-file batch combined into one file.
+- **Download** — the reviewed (and edited) transcripts as plain text (`.txt`), with a multi-file batch combined into one file. Locked until every result in the batch is marked reviewed.
 - **"Reading room" light & dark themes** — a clinical blue-slate palette with a teal accent that follows your OS light/dark setting (switchable in Settings), WCAG AA throughout in both modes, with self-hosted fonts (no third-party CDN).
 
 ## Prerequisites
@@ -63,10 +64,22 @@ Once a request runs:
 
 - **Live progress** — a status panel tracks the batch, with a toast when it finishes.
 - **Transcript** — a single view under a **Transcript** header beside the inputs (stacked below them on narrow screens), displaying the response; multiple results are labeled and divided per file.
-- **Metrics & download** — each transcript is topped with **Duration**, **Confidence**, and **Low-confidence words** metric cards, and a **Download transcript** (`.txt`) button above the panel saves every result in the batch as one file.
+- **Metrics & download** — each transcript is topped with **Duration**, **Confidence**, and **Low-confidence words** metric cards. A download button above the panel saves every result in the batch as one `.txt` file — the text from each result's editor, not Deepgram's original — and stays locked (**Download locked — 1/2 reviewed**) until every result is marked reviewed. See [Reviewing a transcript](#reviewing-a-transcript).
 - **Low-confidence flags** — words scored below 90% model confidence render in **bold orange**, under a caption that says whether any were flagged. If the per-word data is missing, or does not reproduce the transcript exactly, the transcript is shown unhighlighted with a notice to review every word. See [What a flag means](#what-a-flag-means).
 - **Audio player** — pinned above the scrollable transcript. Inline audio over 25 MB — a large upload or a long recording — shows a notice instead of the player to limit memory.
 - **Diarized view** — with **Diarize** on, the transcript is split into color-coded `Speaker 1:`, `Speaker 2:`, … lines.
+- **Review controls** — under each highlighted transcript, a **Transcript to export** editor and a **Reviewed against the audio** checkbox (numbered "(1 of 2)", … in a multi-file batch).
+
+### Reviewing a transcript
+
+The highlighted view always shows Deepgram's original words; the **Transcript to export** editor below it is what **Download** saves. It starts as the same text, as plain `Speaker N:` lines when diarized, with no highlighting.
+
+1. Play the audio and check the transcript against it, flagged words first.
+2. Correct errors in the editor. An edit applies when you **click away or press Ctrl/⌘+Enter**, and an applied edit always leaves the result unreviewed — so if you type and then click **Reviewed** in one motion, confirm the box stayed checked.
+3. Check **Reviewed against the audio**. This freezes that result's editor, so nothing typed afterwards can slip into the download. To change it, uncheck **Reviewed** (which re-locks **Download**), edit, and check it again.
+4. Once every result is reviewed, **Download transcript** unlocks. A new **Run** starts over: fresh editors, nothing reviewed.
+
+A long transcript appears twice in the scrolling panel — the highlighted view, then the editor.
 
 ### What a flag means
 
@@ -76,14 +89,14 @@ A flag is a pointer to the audio, not a verdict — check flagged words first, b
 - **Unmarked words can still be wrong.** A model can be confidently wrong, and **keyterm prompting inflates confidence** for the boosted terms — a misheard drug name you listed as a keyterm may come back unflagged.
 - **Redaction tags are never flagged** (`[SSN_1]`, `[REDACTED]`, …): the spoken content is gone, so there is nothing to check it against.
 - **A flagged formatted number means "check the whole value."** Smart Format merges a spoken number into one token (a dose, a phone number) with one confidence, so the flag covers all of it.
-- The flags describe Deepgram's original words; the downloaded `.txt` carries the same words, without highlighting.
+- The flags describe Deepgram's original words and never move when you edit. The downloaded `.txt` carries the editor's text, which starts as those same words without highlighting.
 
 **Troubleshooting** — if transcription fails with a per-file error (rather than the app refusing to start), check that `DEEPGRAM_API_KEY` is valid and has available credit: an invalid or expired key is reported as a per-item transcription failure, not a startup error.
 
 ## Architecture
 
 - **`nova/`** — the framework-free core (no Streamlit imports): `config` (constants), `transcribe` (`build_options` + `transcribe_batch`), `results` (response walkers and low-confidence flagging). Speakers are Deepgram's native 0-based integers here.
-- **`streamlit_app.py`** — the Streamlit UI; a thin adapter over `nova/` that adds widgets, session state, and the renderers (which display speakers 1-based).
+- **`streamlit_app.py`** — the Streamlit UI; a thin adapter over `nova/` that adds widgets, session state, the renderers (which display speakers 1-based), and the review/sign-off gate on Download.
 
 ## Testing
 
