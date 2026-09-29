@@ -15,9 +15,8 @@ __pycache__/
 .ruff_cache/
 .venv/
 
-# App exports (the Download buttons produce these; never part of the repo)
+# App export (the Download button produces this; never part of the repo)
 transcripts.txt
-subtitles.srt
 
 # OS
 .DS_Store
