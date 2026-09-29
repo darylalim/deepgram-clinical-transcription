@@ -84,11 +84,14 @@ codeTextColor = "#C3CED6"            # code sits a step quieter than body text (
 linkColor = "#6EB3EA"                # conventional link blue, 8.00:1 on canvas
 # Widget and container borders — including the unchecked "Reviewed against the audio"
 # checkbox, whose outline is the ONLY thing that shows it: WCAG 1.4.11 needs 3:1
-# against the canvas, which the previous #36434D missed (1.78:1). #546878 is 3.12:1 on
-# the canvas — COMPUTED, NOT YET MEASURED IN-BROWSER. A checked box fills with
-# primaryColor (6.98:1); its white tick is not relied on. The sidebar keeps its own,
-# softer borderColor (below): the change is scoped to the main area, where the
-# checkbox renders.
+# against the canvas, which the previous #36434D missed (1.78:1). #546878 measured
+# in-browser at 3.12:1 against the canvas, for both the checkbox border and the
+# text_area outline (rendered exactly #546878 on #11171B). Against the fills inside
+# them it is lower: 2.94:1 on the checkbox's derived #161D23 interior, 2.75:1 on the
+# text_area's #1B2329. WCAG 1.4.11 is read on the outer boundary (the canvas). A
+# checked box fills with primaryColor (6.98:1); its white tick is not relied on. The
+# sidebar keeps its own, softer borderColor (below): the change is scoped to the main
+# area, where the checkbox renders.
 borderColor = "#546878"
 
 # Accent — clinical teal, SPLIT BY ZONE in this mode only. Streamlit hardcodes the
@@ -156,8 +159,10 @@ textColor = "#0F171C"                # slate ink, 18.11:1 — darker than it nee
 codeTextColor = "#2B3A44"            # 10.50:1 on the code surface
 linkColor = "#1F6FB8"                # 5.22:1 on canvas
 # Raised for the unchecked Reviewed checkbox (WCAG 1.4.11, 3:1 on the canvas; the
-# previous #C8D2D9 was 1.54:1): #7E95A5 is 3.12:1 on white — COMPUTED, NOT YET
-# MEASURED IN-BROWSER. A checked box fills with primaryColor (5.76:1).
+# previous #C8D2D9 was 1.54:1): #7E95A5 measured in-browser at 3.12:1 on white, for
+# both the checkbox border (whose interior is also white) and the text_area outline;
+# 2.80:1 against the text_area's own #EFF3F5 fill. A checked box fills with
+# primaryColor (5.76:1).
 borderColor = "#7E95A5"
 
 # Accent — ONE teal. On a light canvas the constraints that force the dark-mode split
