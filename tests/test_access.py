@@ -202,6 +202,15 @@ class TestParseAuth:
 
         assert parse_auth(auth) == access.AuthConfig((None,))
 
+    def test_exactly_the_minimum_length_is_enough(self):
+        # 32 characters, all distinct, no placeholder marker: the boundary itself.
+        secret = "0123456789abcdefghijklmnopqrstuv"
+        assert len(secret) == access.MIN_COOKIE_SECRET_LENGTH
+
+        auth = {**AUTH, "cookie_secret": secret}
+
+        assert parse_auth(auth) == access.AuthConfig((None,))
+
 
 class TestParsePolicy:
     def test_list_of_domains(self):
@@ -513,6 +522,15 @@ class TestDecideAccess:
             {**SIGNED_IN, "iat": NOW - MAX_SESSION_AGE_SECONDS - 1},
             {k: v for k, v in SIGNED_IN.items() if k != "iat"},
             {**SIGNED_IN, "provider": "okta"},  # removed from [auth] since sign-in
+            # Freshness is checked before the email: a stale sign-in by an account
+            # that would be refused is asked to sign in again, never denied (and
+            # never logged as access_denied).
+            {
+                **SIGNED_IN,
+                "email": "dr@evil.org",
+                "iat": NOW - MAX_SESSION_AGE_SECONDS - 1,
+            },
+            {**SIGNED_IN, "email": "dr@evil.org", "provider": "okta"},
         ],
     )
     def test_stale_sign_in_means_login_again(self, claims):
@@ -524,8 +542,28 @@ class TestDecideAccess:
         decision = _decide()
 
         assert decision == access.Decision(
-            "allow", email="dr@hospital.org", providers=(None,)
+            "allow",
+            email="dr@hospital.org",
+            providers=(None,),
+            expires_at=NOW - 60 + MAX_SESSION_AGE_SECONDS,  # SIGNED_IN's iat
         )
+
+    def test_allowed_sign_in_expires_when_it_turns_stale(self):
+        # The UI re-checks `expires_at` where the gate does not run; it must agree
+        # with the gate's own boundary: still allowed at it, stale one second past.
+        claims = {**SIGNED_IN, "iat": NOW - 60}
+        expires_at = _decide(claims=claims).expires_at
+        assert expires_at == NOW - 60 + MAX_SESSION_AGE_SECONDS
+
+        assert _decide(claims=claims, now=expires_at).kind == "allow"
+        assert _decide(claims=claims, now=expires_at + 1).reauth is True
+
+    def test_only_an_allowed_sign_in_carries_an_expiry(self):
+        refused = _decide(claims={**SIGNED_IN, "email": "dr@other.org"})
+        anonymous = _decide(SecretsSnapshot("missing"), allow_anonymous=True)
+
+        assert (refused.kind, refused.expires_at) == ("deny", None)
+        assert (anonymous.kind, anonymous.expires_at) == ("anonymous", None)
 
     def test_denied_carries_the_reason_and_normalized_email(self):
         decision = _decide(claims={**SIGNED_IN, "email": " Dr@Evil-Hospital.org"})

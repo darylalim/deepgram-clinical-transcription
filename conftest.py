@@ -10,8 +10,8 @@ from streamlit import config
 
 from nova.config import ALLOW_ANONYMOUS_ENV
 
-# Set, not popped: load_dotenv never overrides an existing variable, so a .env line
-# cannot put this process on the anonymous branch.
+# Any value but "1", so a developer's shell cannot put this process on the anonymous
+# branch. (.env never can: the app's _load_dotenv never copies the opt-out.)
 os.environ[ALLOW_ANONYMOUS_ENV] = "0"
 # No secrets files, so neither ./.streamlit/secrets.toml nor ~/.streamlit/secrets.toml
 # reaches the gate (or mirrors its top-level values into os.environ).

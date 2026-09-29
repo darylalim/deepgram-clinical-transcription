@@ -5,13 +5,13 @@ import re
 import time
 import uuid
 import wave
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import as_completed
 from typing import Any
 
 import streamlit as st
 from deepgram import DeepgramClient
-from dotenv import dotenv_values, load_dotenv
+from dotenv import dotenv_values
 from streamlit.errors import StreamlitSecretNotFoundError
 
 from nova import audit
@@ -48,7 +48,33 @@ from nova.results import (
 )
 from nova.transcribe import build_options, option_warnings, transcribe_batch
 
-load_dotenv()
+
+def _names_opt_out(keys: Iterable[object]) -> bool:
+    """Whether any key names the anonymous opt-out, compared case-insensitively.
+
+    Case-insensitive because Windows' `os.environ` is: a lowercase
+    `nova_allow_anonymous` in `.env` or `secrets.toml` would land there as the real
+    variable, so each file's detector must see it too.
+    """
+    return any(isinstance(k, str) and k.upper() == ALLOW_ANONYMOUS_ENV for k in keys)
+
+
+def _load_dotenv() -> None:
+    """Copy `.env` into `os.environ` like `load_dotenv()` (never overriding a set
+    variable), except the anonymous opt-out, which is never copied.
+
+    Filtered because `os.environ` outlives the script run: had `.env` ever put the
+    opt-out there, deleting the line (as the blocked app's operator message says to)
+    would leave it set until a restart, and the next run would open anonymously.
+    The opt-out in `.env` is only ever detected (`_dotenv_has_opt_out`), which
+    blocks the app.
+    """
+    for key, value in dotenv_values().items():
+        if value is not None and not _names_opt_out([key]) and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
 
 # 30 minutes — covers a standard clinic encounter. At st.audio_input's default 16 kHz
 # 16-bit mono WAV (32 kB/s) that is ~58 MB: well under the 200 MB upload cap, but
@@ -131,14 +157,16 @@ def _secrets_snapshot() -> SecretsSnapshot:
 
     Read through the public `st.secrets` (so AppTest's `at.secrets` drives it). No
     secrets file at all is "missing"; any other read failure (a TOML syntax error, a
-    bad path) is "malformed", which the gate treats as fail-closed.
+    bad path) is "malformed", which the gate treats as fail-closed. The opt-out
+    counts as present under any value and any letter case, since Streamlit copies a
+    top-level secret into `os.environ` as `str(value)` (`= 1` becomes "1").
     """
     try:
         return SecretsSnapshot(
             "ok",
             auth=st.secrets.get("auth"),
             access=st.secrets.get("access"),
-            anonymous_opt_out_present=st.secrets.get(ALLOW_ANONYMOUS_ENV) is not None,
+            anonymous_opt_out_present=_names_opt_out(st.secrets),
         )
     except StreamlitSecretNotFoundError as exc:
         missing = getattr(exc, "error_id", None) == "no-secrets-found"
@@ -151,13 +179,15 @@ def _authlib_installed() -> bool:
 
 
 def _dotenv_has_opt_out() -> bool:
-    """Whether `.env` sets the anonymous opt-out (a test seam).
+    """Whether `.env` names the anonymous opt-out, in any case (a test seam).
 
-    `load_dotenv` copies `.env` into `os.environ`, so without this check a dev `.env`
-    copied onto a host would switch sign-in off. The gate blocks instead: the opt-out
-    must come from the real process environment.
+    `_load_dotenv` never copies it, so a dev `.env` copied onto a host cannot switch
+    sign-in off; the gate blocks instead, to say so. The opt-out must come from the
+    real process environment. Re-read on every run, so deleting the line unblocks
+    the app without a restart — and into anonymous mode only if the process
+    environment itself sets the opt-out.
     """
-    return ALLOW_ANONYMOUS_ENV in dotenv_values()
+    return _names_opt_out(dotenv_values())
 
 
 def _sign_in_label(provider: str | None) -> str:
@@ -181,9 +211,11 @@ def _access_gate() -> Decision | None:
     Returns the Decision when the app may continue (signed in and allowed, or
     anonymous local development), else None after rendering the refusal — the
     caller then calls `st.stop()`. `access_ok` is rewritten on every full run (False
-    before any stop, and until the gate's audit record is written), and the output
-    fragment and review callbacks check it, since they rerun without passing through
-    here. `st.login` is only ever a button callback, never called on render.
+    before any stop, and until the gate's audit record is written), together with
+    `access_expires_at` (when an allowed sign-in turns stale; None otherwise). The
+    output fragment and the review callbacks check both via `_access_ok`, and the
+    download callable its own captured expiry, since they run without passing
+    through here. `st.login` is only ever a button callback, never called on render.
     """
     decision = decide_access(
         _secrets_snapshot(),
@@ -197,6 +229,7 @@ def _access_gate() -> Decision | None:
     allowed = decision.kind in ("allow", "anonymous")
     # Closed until the gate's audit record is written: if it cannot be, nothing opens.
     st.session_state["access_ok"] = False
+    st.session_state["access_expires_at"] = decision.expires_at
     _audit_gate(decision)
     st.session_state["access_ok"] = allowed
 
@@ -312,8 +345,15 @@ def _sign_out_button() -> None:
 
 
 def _account_panel(email: str) -> None:
-    """Sidebar account block: who is signed in, and Sign out."""
-    st.caption(f":material/account_circle: Signed in as {_escape_markdown(email)}")
+    """Sidebar account block: who is signed in, and Sign out.
+
+    The email is `st.text`, not part of the caption: Markdown would autolink it
+    (a `mailto:` in link color) and the caption's 60% opacity then dims that link
+    below WCAG AA. Plain text renders it verbatim, unlinked, as full-opacity body
+    text — so it needs no Markdown escaping either.
+    """
+    st.caption(":material/account_circle: Signed in as")
+    st.text(email)
     _sign_out_button()
 
 
@@ -658,33 +698,55 @@ def _export_blob(named_texts: list[tuple[str, str]]) -> str:
 
 
 def _deferred_export(
-    named_texts: list[tuple[str, str]], actor: audit.Actor, event: audit.AuditEvent
+    named_texts: list[tuple[str, str]],
+    actor: audit.Actor,
+    event: audit.AuditEvent,
+    expires_at: float | None,
 ) -> Callable[[], str]:
     """Zero-arg `data` callable for the download button, over values captured now.
 
     Streamlit runs it on every click, on a worker thread with no ScriptRunContext, so
     it must never touch `st.*` (session state included): it closes over plain
-    strings, the audit actor, and the already-validated `transcript_downloaded`
-    event, all captured at render. It logs that event, then returns the file — one
-    audit line per file generated. It raises only if the line cannot be written,
-    which fails the download closed; Streamlit logs a failing callable with its
-    traceback, so every exception on this path must be PHI-free (an
-    `AuditSchemaError` names fields, never values), and nothing else here can fail.
+    strings, the audit actor, the already-validated `transcript_downloaded` event,
+    and the sign-in's expiry, all captured at render. A click after that expiry is
+    refused — the button can outlive it on an idle page, and a click reruns
+    nothing. Otherwise it logs the event, then returns the file — one audit line per
+    file generated. It raises only on expiry or if the line cannot be written, both
+    failing the download closed; Streamlit logs a failing callable with its
+    traceback, so every exception on this path must be PHI-free (`DOWNLOAD_EXPIRED`
+    is fixed text, and an `AuditSchemaError` names fields, never values).
     """
     captured = [(str(name), str(text)) for name, text in named_texts]
 
     def _build() -> str:
+        if _expired(expires_at):
+            raise PermissionError(DOWNLOAD_EXPIRED)
         audit.emit(actor, event)
         return _export_blob(captured)
 
     return _build
 
 
+def _expired(expires_at: object) -> bool:
+    """Whether a sign-in expiry (epoch seconds) has passed; None never expires (an
+    anonymous session). Anything but a number — or NaN — counts as expired."""
+    if expires_at is None:
+        return False
+    return not (
+        isinstance(expires_at, int | float)
+        and not isinstance(expires_at, bool)
+        and time.time() <= expires_at
+    )
+
+
 def _access_ok() -> bool:
     """Whether this session passed the gate on its last full run (identity, not
-    truthiness). Fragment reruns and widget callbacks skip the gate, so they check
-    this instead."""
-    return st.session_state.get("access_ok") is True
+    truthiness) and that sign-in has not expired since. Fragment reruns and widget
+    callbacks skip the gate — an open page can go on using them for hours — so they
+    check this instead."""
+    return st.session_state.get("access_ok") is True and not _expired(
+        st.session_state.get("access_expires_at")
+    )
 
 
 def _audit_review(run_id: str, index: int) -> None:
@@ -733,13 +795,19 @@ def _audit_review(run_id: str, index: int) -> None:
 
 
 def _on_edit(run_id: str, index: int) -> None:
-    """Editor `on_change`: an applied edit clears that result's Reviewed flag.
+    """Editor `on_change`: an applied edit clears that result's Reviewed flag, and
+    says so.
 
-    Defensive: while Reviewed is checked the editor renders disabled, and Streamlit
-    then discards any incoming value and skips this callback. It fires with the flag
-    set only when an edit and a check land in the same rerun — the check is then
-    undone, failing toward review (and audited if the sign-off already was). A no-op
-    for a session that has not passed the gate.
+    While Reviewed is checked the editor renders disabled, and Streamlit then
+    discards any incoming value and skips this callback — so it fires with the flag
+    set only when an edit and a check land in the same rerun. In a browser that is
+    the ordinary "type a correction, then click Reviewed" path: a text area commits
+    on blur, and the click is the blur. Clearing is what keeps the edit. Left set,
+    the flag would render the editor disabled in this very run, and Streamlit drops
+    a disabled widget's incoming value when it registers — the box would stay
+    checked over the pre-edit text, the correction silently gone. So the check is
+    undone (audited if the sign-off already was) and a toast asks for it again. A
+    no-op for a session that has not passed the gate.
     """
     if not _access_ok():
         return
@@ -747,6 +815,7 @@ def _on_edit(run_id: str, index: int) -> None:
     if st.session_state.get(key) is True:
         st.session_state[key] = False
         _audit_review(run_id, index)
+        st.toast(REVIEW_CLEARED, icon=":material/edit_note:")
 
 
 def _on_review(run_id: str, index: int) -> None:
@@ -808,9 +877,9 @@ def _transcript_download(
     path, so this is the server-side half of the gate. Unlocked, the blob is a
     deferred callable over the editors' text captured at this render (assembled only
     on click) that also logs `transcript_downloaded` — its actor and event (the run,
-    and how many results were edited) are built here, since the callable runs
-    without session context. `on_click="ignore"` skips the pointless rerun a click
-    would otherwise trigger.
+    and how many results were edited) and the sign-in's expiry are captured here,
+    since the callable runs without session context. `on_click="ignore"` skips the
+    pointless rerun a click would otherwise trigger.
     """
     if not responses:
         return
@@ -828,7 +897,10 @@ def _transcript_download(
         )
         event = audit.transcript_downloaded(run=run_id, n_results=n, n_edited=n_edited)
         data = _deferred_export(
-            list(zip(names, texts, strict=True)), _audit_actor(), event
+            list(zip(names, texts, strict=True)),
+            _audit_actor(),
+            event,
+            st.session_state.get("access_expires_at"),
         )
     st.download_button(
         DOWNLOAD_LABEL if unlocked else f"Download locked — {done}/{n} reviewed",
@@ -912,9 +984,12 @@ PLAYBACK_TOO_LARGE = "Inline playback unavailable for files over 25 MB."
 EDIT_LABEL = "Transcript to export"
 EDIT_HELP = (
     "Correct errors here — this text, not the highlighted view above, is what "
-    "Download saves. Click away or press Ctrl/⌘+Enter to apply an edit. "
-    "Checking Reviewed locks this text; uncheck Reviewed to edit again."
+    "Download saves. Press Ctrl/⌘+Enter (or click elsewhere) to apply an edit "
+    "before checking Reviewed; an edit applied by the Reviewed click itself clears "
+    "the check. Checking Reviewed locks this text; uncheck Reviewed to edit again."
 )
+# Toasted when an applied edit clears a Reviewed check (see _on_edit).
+REVIEW_CLEARED = "Edit applied, so Reviewed was cleared — check it again to sign off."
 REVIEWED_LABEL = "Reviewed against the audio"
 DOWNLOAD_LABEL = "Download transcript"
 DOWNLOAD_LOCKED_HELP = (
@@ -925,6 +1000,9 @@ DOWNLOAD_LOCKED_HELP = (
 # operator who deliberately opted out of sign-in ever sees it.
 SIGN_IN_PROMPT = "Sign in with your work account to use this app."
 SESSION_EXPIRED = "Your sign-in has expired. Sign in again to continue."
+# Raised by a download clicked after the sign-in expired. Streamlit logs it with a
+# traceback, so it is fixed text — never a filename or transcript.
+DOWNLOAD_EXPIRED = "Download refused: the sign-in has expired"
 SIGN_IN_UNAVAILABLE = "Sign-in is unavailable. Contact your administrator."
 ANONYMOUS_MODE = (
     f"**Anonymous mode** — sign-in is off because `{ALLOW_ANONYMOUS_ENV}=1` is set in "
@@ -962,10 +1040,14 @@ def _render_output() -> None:
     reflects the latest batch; a Run (in the Features form, outside this fragment)
     triggers a full rerun that refreshes it under a new `run_id`.
 
-    Renders nothing unless this session passed the access gate: a fragment rerun
-    skips the gate, and a stopped run leaves the fragment registered.
+    Renders nothing unless this session passed the access gate and its sign-in has
+    not expired since: a fragment rerun skips the gate, and a stopped run leaves the
+    fragment registered. Once an admitted sign-in expires, the next interaction here
+    reruns the whole app instead, whose gate then asks for a fresh sign-in.
     """
     if not _access_ok():
+        if st.session_state.get("access_ok") is True:  # admitted, but now expired
+            st.rerun(scope="app")
         return
     responses = st.session_state.get("responses", [])
     audio_sources = st.session_state.get("audio_sources", [])
@@ -999,7 +1081,7 @@ access_decision = _access_gate()
 if access_decision is None:
     st.stop()
 
-# Environment first (`.env` via load_dotenv), then `st.secrets` for deployed hosts.
+# Environment first (`.env` via _load_dotenv), then `st.secrets` for deployed hosts.
 api_key = os.environ.get("DEEPGRAM_API_KEY", "") or _secret_api_key()
 if not api_key:
     st.warning(

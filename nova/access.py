@@ -135,6 +135,9 @@ class Decision:
     providers: tuple[str | None, ...] = ()
     problem: str | None = None  # operator-facing; names keys, never values
     reauth: bool = False  # login because the previous sign-in expired or is stale
+    # An allowed sign-in's expiry (epoch seconds: `iat` + MAX_SESSION_AGE_SECONDS),
+    # for the UI to re-check where the gate does not run. None for every other kind.
+    expires_at: float | None = None
 
 
 def _blocked(reason: DenyReason, problem: str) -> Decision:
@@ -300,6 +303,18 @@ def check_email(
     return None
 
 
+def _issued_at(claims: Mapping[str, object]) -> float | None:
+    """The ID token's `iat` in epoch seconds; None unless a finite number (not a bool)."""
+    issued_at = claims.get("iat")
+    if (
+        isinstance(issued_at, bool)
+        or not isinstance(issued_at, int | float)
+        or not math.isfinite(issued_at)
+    ):
+        return None
+    return float(issued_at)
+
+
 def session_is_fresh(
     claims: Mapping[str, object], providers: tuple[str | None, ...], now: float
 ) -> bool:
@@ -309,12 +324,8 @@ def session_is_fresh(
     MAX_SESSION_AGE_SECONDS, or is more than MAX_CLOCK_SKEW_SECONDS in the future;
     also when the `provider` claim names a provider no longer in [auth].
     """
-    issued_at = claims.get("iat")
-    if (
-        isinstance(issued_at, bool)
-        or not isinstance(issued_at, int | float)
-        or not math.isfinite(issued_at)
-    ):
+    issued_at = _issued_at(claims)
+    if issued_at is None:
         return False
     if now - issued_at > MAX_SESSION_AGE_SECONDS:
         return False
@@ -345,8 +356,11 @@ def decide_access(
     3. [auth] invalid, Authlib missing, trusted user headers on, or [access]
        invalid -> blocked. (The opt-out is ignored whenever [auth] exists.)
     4. Not signed in (`is_logged_in` is not exactly True — an injected `email` alone
-       never counts) -> login; signed in but stale -> login with `reauth`.
-    5. The email policy -> deny with a reason, or allow.
+       never counts) -> login; signed in but stale -> login with `reauth` (checked
+       before the email, so a stale sign-in is asked to sign in again, not denied).
+    5. The email policy -> deny with a reason, or allow carrying `expires_at` (when
+       the sign-in turns stale): `now` is one moment, so the UI re-checks the expiry
+       wherever the gate does not run.
     """
     if secrets.state == "malformed":
         return _blocked("auth_misconfigured", PROBLEM_SECRETS_UNPARSEABLE)
@@ -374,13 +388,19 @@ def decide_access(
 
     if claims.get("is_logged_in") is not True:
         return Decision("login", providers=auth.providers)
-    if not session_is_fresh(claims, auth.providers, now):
+    issued_at = _issued_at(claims)
+    if issued_at is None or not session_is_fresh(claims, auth.providers, now):
         return Decision("login", providers=auth.providers, reauth=True)
     email = normalize_email(claims.get("email"))
     reason = check_email(claims, policy)
     if reason is not None:
         return _deny(reason, email)
-    return Decision("allow", email=email, providers=auth.providers)
+    return Decision(
+        "allow",
+        email=email,
+        providers=auth.providers,
+        expires_at=issued_at + MAX_SESSION_AGE_SECONDS,
+    )
 
 
 def report_problem(problem: str) -> None:

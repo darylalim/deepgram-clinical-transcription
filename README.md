@@ -8,10 +8,10 @@ Streamlit application for medical transcription using Deepgram's Nova-3 Medical 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">
-  <img alt="The app showing a diarized clinic-visit transcript: a Features sidebar with keyterms, Diarize and Measurements enabled; an Upload tab holding clinic-visit.wav; and the Transcript tab with Duration and Confidence metrics, an audio player, and color-coded Speaker 1 / Speaker 2 lines." src="docs/screenshot-light.png">
+  <img alt="An earlier version of the app showing a diarized clinic-visit transcript: a Features sidebar with keyterms, Diarize and Measurements enabled; an Upload tab holding clinic-visit.wav; and the transcript output with Duration and Confidence metrics, an audio player, and color-coded Speaker 1 / Speaker 2 lines." src="docs/screenshot-light.png">
 </picture>
 
-<sub>Screenshot uses a synthetic, fictional transcript — no real patient audio.</sub>
+<sub>Screenshot uses a synthetic, fictional transcript — no real patient audio. It is out of date: it predates sign-in, the low-confidence flags, and the review/sign-off gate on Download, and will be regenerated.</sub>
 
 ## Features
 
@@ -46,7 +46,7 @@ Streamlit application for medical transcription using Deepgram's Nova-3 Medical 
 NOVA_ALLOW_ANONYMOUS=1 uv run streamlit run streamlit_app.py
 ```
 
-The app honors it only for the exact value `1`, only when no `[auth]` is configured, and only from the process environment. Put in `.env` or `secrets.toml`, it blocks the app instead. An **Anonymous mode** banner stays on screen. Never use it with real patient audio.
+The app honors it only for the exact value `1`, only when no `[auth]` is configured, and only from the process environment. Put in `.env` or `secrets.toml`, under any value or letter case, it blocks the app instead; the app never copies it from `.env` into the environment, so deleting the line there takes effect on the next page load, with no restart. An **Anonymous mode** banner stays on screen. Never use it with real patient audio.
 
 ## Usage
 
@@ -86,7 +86,7 @@ Once a request runs:
 The highlighted view always shows Deepgram's original words; the **Transcript to export** editor below it is what **Download** saves. It starts as the same text, as plain `Speaker N:` lines when diarized, with no highlighting.
 
 1. Play the audio and check the transcript against it, flagged words first.
-2. Correct errors in the editor. An edit applies when you **click away or press Ctrl/⌘+Enter**, and an applied edit always leaves the result unreviewed — so if you type and then click **Reviewed** in one motion, confirm the box stayed checked.
+2. Correct errors in the editor, then **press Ctrl/⌘+Enter** (or click elsewhere on the page) to apply the edit. An applied edit always leaves the result unreviewed. If you type and then click **Reviewed** straight away, that click is what applies the edit: the edit is kept, but the box clears again, and a toast says so. Check it once more.
 3. Check **Reviewed against the audio**. This freezes that result's editor, so nothing typed afterwards can slip into the download. To change it, uncheck **Reviewed** (which re-locks **Download**), edit, and check it again.
 4. Once every result is reviewed, **Download transcript** unlocks. A new **Run** starts over: fresh editors, nothing reviewed.
 
@@ -119,7 +119,7 @@ Every visitor passes a sign-in gate before the app renders anything else: no inp
 
 **Who is allowed** is set in `[access]`:
 
-- `allowed_email_domains` lists exact domains, matched case-insensitively. There are no wildcards and no subdomain matching: `sub.hospital.org` must be listed itself, and `evil-hospital.org` never matches `hospital.org`. It can be a list or a comma-separated string. Empty or missing refuses everyone.
+- `allowed_email_domains` lists exact domains, matched case-insensitively. There are no wildcards and no subdomain matching: `sub.hospital.org` must be listed itself, and `evil-hospital.org` never matches `hospital.org`. It can be a list or a comma-separated string. Empty or missing blocks the app: every visitor sees "Sign-in is unavailable".
 - The email must be verified: the token's `email_verified` must be true. `unverified_email_providers` names providers whose tokens may leave the claim out (`"default"` is the flat `[auth]` provider). Tokens from any other provider are refused without it.
 - A Google token must also carry a hosted-domain (`hd`) claim that is allowlisted, so a personal Google account registered on a work address is refused.
 
@@ -127,7 +127,9 @@ Every visitor passes a sign-in gate before the app renders anything else: no inp
 
 - the secrets file can't be read;
 - `[auth]` has no `redirect_uri` ending in `/oauth2callback`, no random `cookie_secret` of at least 32 characters (the template's placeholder is refused), or an incomplete provider;
-- `[access]` is present without `[auth]`, or lists no valid domain;
+- a provider table is named `default` (reserved for the flat provider) or has a `_` in its name, as in `[auth.my_idp]`;
+- `[auth]` is present without `[access]`, or `[access]` without `[auth]`;
+- `[access]` lists no valid domain, or its `unverified_email_providers` names a provider that isn't configured in `[auth]`;
 - Authlib is not installed;
 - Streamlit's `server.trustedUserHeaders` is set, since header claims would override sign-in claims;
 - `NOVA_ALLOW_ANONYMOUS` appears in `.env` or `secrets.toml`.
@@ -138,11 +140,12 @@ Every visitor passes a sign-in gate before the app renders anything else: no inp
 - **Microsoft Entra ID**: use your tenant-specific `server_metadata_url` (never `/common` or `/organizations`), which pins sign-in to your tenant. Entra ID tokens carry no `email_verified`, so list the provider in `unverified_email_providers`.
 - **Okta** may leave `email_verified` out of its "thin" ID tokens (not checked against a live tenant). If sign-ins are denied as unverified, include the claim in the token at Okta. Otherwise list the provider in `unverified_email_providers`, but only if you trust its email addresses.
 
-**Shared workstations.** **Sign out** first clears the session's results, review edits, uploads, recording, and keyterms. It then ends the sign-in and redirects through the provider's own logout, when it has one. Google has none, so the next person could click **Sign in** and pick the previous clinician's still-active Google session. For Entra, Okta, and Auth0, set `client_kwargs = { prompt = "login" }` so the provider asks for credentials on every sign-in. With Google, users must also sign out of Google, and a caption under **Sign out** says so.
+**Shared workstations.** **Sign out** first clears the session's results, review edits, uploads, recording, and keyterms. It then ends the sign-in and redirects through the provider's own logout, when it has one. Google has none, so the next person could click **Sign in** and pick the previous clinician's still-active Google session. For Entra, Okta, and Auth0, set `client_kwargs = { prompt = "login" }` so the provider asks for credentials on every sign-in. With Google, users must also sign out of Google, and a caption under **Sign out** says so. (OpenID Connect's `max_age = 0` asks for the same fresh sign-in, but only a named provider table can send it, as `authorize_params = { max_age = 0 }` in an `[auth.google]` table; check that your provider honors it.) **Sign out** ends only the browser tab it is clicked in; see the known limits below, and close the app's other tabs.
 
 **Known limits:**
 
-- **Session length.** Streamlit's identity cookie lasts 30 days and never re-checks the ID token. The app caps a sign-in at 12 hours by the token's `iat` (`MAX_SESSION_AGE_SECONDS`), so someone disabled at the identity provider keeps access for up to 12 hours, or until they sign out.
+- **Session length.** Streamlit's identity cookie lasts 30 days and never re-checks the ID token. The app caps a sign-in at 12 hours by the token's `iat` (`MAX_SESSION_AGE_SECONDS`). The cap is checked on every page load and Run, and also on each edit, **Reviewed** click, and download in the transcript panel, so an idle open page cannot outlive it. Someone disabled at the identity provider can still keep access for up to 12 hours, because the app never asks the provider again.
+- **One sign-in per tab.** Streamlit reads each browser tab's identity from the sign-in cookie once, when the page connects. **Sign out** in one tab clears that cookie, but other tabs already open stay signed in until they reload or reach the 12-hour cap. Signing out at the identity provider ends no session here at all. On a shared computer, close every tab of the app.
 - **Media URLs.** Audio players and file downloads are served from unguessable `/media/…` URLs that carry no sign-in or session check. Anyone holding one can fetch it while it exists.
 - **Uploads.** Streamlit's upload endpoint (`/_stcore/upload_file/…`) checks XSRF and the session, not sign-in. A client sitting on the sign-in screen can still push files of up to 200 MB each into server memory. For an internet-facing deployment, set body-size and rate limits on that path at a reverse proxy, or put an auth proxy (oauth2-proxy, IAP) in front of the app.
 - **Outbound traffic.** With sign-in configured, the server contacts the identity provider (its metadata, JWKS, and token endpoints), and the browser is redirected there to sign in and out.

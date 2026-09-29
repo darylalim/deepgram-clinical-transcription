@@ -1,9 +1,11 @@
 import inspect
 import json
 import logging
+import os
 import re
 import time
-from unittest.mock import MagicMock, Mock, patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, call, patch
 
 import pytest
 
@@ -12,12 +14,13 @@ from nova.access import (
     PROBLEM_AUTHLIB,
     PROBLEM_NOT_CONFIGURED,
     PROBLEM_OPT_OUT_IN_DOTENV,
+    PROBLEM_OPT_OUT_IN_SECRETS,
     PROBLEM_SECRETS_UNPARSEABLE,
     PROBLEM_TRUSTED_HEADERS,
     Decision,
 )
 from nova.audit import Actor, AuditSchemaError
-from nova.config import ALLOW_ANONYMOUS_ENV
+from nova.config import ALLOW_ANONYMOUS_ENV, MAX_SESSION_AGE_SECONDS
 from tests.helpers import RUN_ID, audit_lines, mock_upload, mock_word, wav_bytes
 
 FAKE_AUDIO = b"fake-audio-data"
@@ -1026,12 +1029,17 @@ class TestReviewControls:
         assert mock_st.text_area.call_args.kwargs["key"] == f"transcript_{RUN_ID}_1"
         assert mock_st.checkbox.call_args.kwargs["key"] == f"reviewed_{RUN_ID}_1"
 
-    def test_on_edit_clears_a_set_flag(self, mock_st):
+    def test_on_edit_clears_a_set_flag_and_says_so(self, mock_st):
+        # The ordinary "type a correction, then click Reviewed" path in a browser:
+        # the click is the blur that applies the edit, so both land in one rerun.
         mock_st.session_state[f"reviewed_{RUN_ID}_0"] = True
 
         streamlit_app._on_edit(RUN_ID, 0)
 
         assert mock_st.session_state[f"reviewed_{RUN_ID}_0"] is False
+        mock_st.toast.assert_called_once_with(
+            streamlit_app.REVIEW_CLEARED, icon=":material/edit_note:"
+        )
 
     def test_on_edit_leaves_an_unset_flag_untouched(self, mock_st):
         mock_st.session_state[f"reviewed_{RUN_ID}_1"] = False
@@ -1041,10 +1049,12 @@ class TestReviewControls:
 
         assert f"reviewed_{RUN_ID}_0" not in mock_st.session_state
         assert mock_st.session_state[f"reviewed_{RUN_ID}_1"] is False
+        mock_st.toast.assert_not_called()  # nothing was cleared, so nothing to say
 
     def test_edit_help_explains_export_apply_and_unlock(self):
         assert "Download saves" in streamlit_app.EDIT_HELP
         assert "Ctrl/⌘+Enter" in streamlit_app.EDIT_HELP
+        assert "before checking Reviewed" in streamlit_app.EDIT_HELP
         assert "uncheck Reviewed to edit again" in streamlit_app.EDIT_HELP
 
 
@@ -1531,6 +1541,13 @@ AUTH = {
 ACCESS = {"allowed_email_domains": ["hospital.org"]}
 
 
+def _mock_secrets(mock_st, data):
+    """Back the mocked `st.secrets` with `data`: `.get` and iteration, as the gate
+    reads it (iteration is how the opt-out's presence is found)."""
+    mock_st.secrets.get.side_effect = lambda key, default=None: data.get(key, default)
+    mock_st.secrets.__iter__.side_effect = lambda: iter(data)
+
+
 def _signed_in(email="dr@hospital.org", **overrides):
     """Claims as Streamlit stores them after a default-provider sign-in."""
     return {
@@ -1551,16 +1568,14 @@ class TestAccessGate:
 
     @pytest.fixture
     def secrets(self, mock_st, monkeypatch):
-        # A developer's shell (or .env via load_dotenv) may set the opt-out.
+        # A developer's shell may set the opt-out (.env never reaches os.environ with it).
         monkeypatch.delenv(ALLOW_ANONYMOUS_ENV, raising=False)
         # Required: a MagicMock option value is truthy, so it would read as trusted
         # user headers being configured.
         mock_st.get_option.return_value = {}
         mock_st.user.to_dict.return_value = {}
         data: dict = {}
-        mock_st.secrets.get.side_effect = lambda key, default=None: data.get(
-            key, default
-        )
+        _mock_secrets(mock_st, data)
         with (
             patch.object(streamlit_app, "_authlib_installed", return_value=True),
             patch.object(streamlit_app, "_dotenv_has_opt_out", return_value=False),
@@ -1611,6 +1626,7 @@ class TestAccessGate:
         )
         mock_st.error.assert_not_called()
         assert mock_st.session_state["access_ok"] is True
+        assert mock_st.session_state["access_expires_at"] is None  # never expires
         assert ALLOW_ANONYMOUS_ENV in streamlit_app.ANONYMOUS_MODE
 
     def test_no_secrets_file_is_treated_as_missing(self, mock_st, secrets, monkeypatch):
@@ -1734,7 +1750,8 @@ class TestAccessGate:
         assert [label for label, _ in self._buttons(mock_st)] == ["Sign in"]
 
     def test_allowed_continues(self, mock_st, configured):
-        mock_st.user.to_dict.return_value = _signed_in("Dr@Hospital.org")
+        claims = _signed_in("Dr@Hospital.org")
+        mock_st.user.to_dict.return_value = claims
 
         decision = streamlit_app._access_gate()
 
@@ -1744,6 +1761,19 @@ class TestAccessGate:
         mock_st.info.assert_not_called()
         mock_st.warning.assert_not_called()
         assert mock_st.session_state["access_ok"] is True
+        # Recorded for the checks that run without the gate (see TestSignInExpiry).
+        assert (
+            mock_st.session_state["access_expires_at"]
+            == claims["iat"] + MAX_SESSION_AGE_SECONDS
+        )
+
+    def test_opt_out_in_secrets_blocks(self, mock_st, secrets, caplog):
+        secrets[ALLOW_ANONYMOUS_ENV.lower()] = 1  # any value, any case
+
+        with caplog.at_level(logging.ERROR, logger="nova.access"):
+            assert streamlit_app._access_gate() is None
+
+        assert PROBLEM_OPT_OUT_IN_SECRETS in caplog.text
 
     def test_denied_names_the_escaped_email_and_offers_sign_out(
         self, mock_st, configured
@@ -1870,9 +1900,8 @@ class TestAccessInputs:
     """The gate's probes of secrets, `.env`, and Authlib."""
 
     def test_snapshot_reads_auth_access_and_the_opt_out(self, mock_st):
-        data = {"auth": AUTH, "access": ACCESS, ALLOW_ANONYMOUS_ENV: "1"}
-        mock_st.secrets.get.side_effect = lambda key, default=None: data.get(
-            key, default
+        _mock_secrets(
+            mock_st, {"auth": AUTH, "access": ACCESS, ALLOW_ANONYMOUS_ENV: "1"}
         )
 
         snapshot = streamlit_app._secrets_snapshot()
@@ -1880,6 +1909,54 @@ class TestAccessInputs:
         assert snapshot.state == "ok"
         assert (snapshot.auth, snapshot.access) == (AUTH, ACCESS)
         assert snapshot.anonymous_opt_out_present is True
+
+    @pytest.mark.parametrize(
+        "key",
+        [ALLOW_ANONYMOUS_ENV, ALLOW_ANONYMOUS_ENV.lower(), "Nova_Allow_Anonymous"],
+    )
+    @pytest.mark.parametrize("value", [1, "0", "true", ""])
+    def test_opt_out_in_secrets_counts_under_any_value_and_case(
+        self, mock_st, key, value
+    ):
+        # Presence, never the value: Streamlit copies a top-level secret into
+        # os.environ as str(value), so a TOML `= 1` arrives as "1" — and on Windows
+        # os.environ ignores case, so `nova_allow_anonymous` arrives as the real
+        # variable.
+        _mock_secrets(mock_st, {key: value})
+
+        assert streamlit_app._secrets_snapshot().anonymous_opt_out_present is True
+
+    def test_other_secrets_are_not_the_opt_out(self, mock_st):
+        _mock_secrets(
+            mock_st,
+            {"auth": AUTH, "DEEPGRAM_API_KEY": "k", f"{ALLOW_ANONYMOUS_ENV}_X": "1"},
+        )
+
+        assert streamlit_app._secrets_snapshot().anonymous_opt_out_present is False
+
+    @pytest.mark.parametrize(
+        "line", ["NOVA_ALLOW_ANONYMOUS = 1", 'nova_allow_anonymous = "1"']
+    )
+    def test_real_secrets_file_opt_out_is_found(self, tmp_path, line):
+        # Through Streamlit's own parser: a TOML integer, and a lowercase key.
+        from streamlit import config
+        from streamlit.runtime.secrets import Secrets
+
+        path = tmp_path / "secrets.toml"
+        path.write_text(line + "\n")
+        saved = config.get_option("secrets.files")
+        config.set_option("secrets.files", [str(path)])
+        try:
+            # patch.dict restores os.environ, which a parse mirrors top-level values into.
+            with patch.dict(os.environ):
+                loaded = Secrets()
+                loaded._file_watchers_installed = True  # no watcher on a temp file
+                with patch.object(streamlit_app.st, "secrets", loaded):
+                    snapshot = streamlit_app._secrets_snapshot()
+        finally:
+            config.set_option("secrets.files", saved)
+
+        assert (snapshot.state, snapshot.anonymous_opt_out_present) == ("ok", True)
 
     @pytest.mark.parametrize(
         ("error_id", "state"),
@@ -1905,6 +1982,11 @@ class TestAccessInputs:
             ({ALLOW_ANONYMOUS_ENV: "1"}, True),
             ({ALLOW_ANONYMOUS_ENV: "0"}, True),  # any mention in .env blocks
             ({ALLOW_ANONYMOUS_ENV: None}, True),
+            (
+                {ALLOW_ANONYMOUS_ENV.lower(): "1"},
+                True,
+            ),  # Windows' os.environ ignores case
+            ({f"{ALLOW_ANONYMOUS_ENV}_X": "1"}, False),
         ],
     )
     def test_dotenv_opt_out_probe(self, values, expected):
@@ -1917,15 +1999,83 @@ class TestAccessInputs:
             assert streamlit_app._authlib_installed() is False
 
 
+class TestDotenvLoad:
+    """`.env` reaches `os.environ` only through `_load_dotenv`, which never copies
+    the anonymous opt-out. `os.environ` outlives a script run, so an opt-out ever
+    copied there would outlast its deletion from `.env` until a restart."""
+
+    @pytest.fixture
+    def dotenv(self, monkeypatch):
+        # A stand-in for the .env file, re-read on every call like the real one.
+        values: dict[str, str | None] = {}
+        monkeypatch.delenv(ALLOW_ANONYMOUS_ENV, raising=False)
+        with (
+            patch.object(
+                streamlit_app, "dotenv_values", side_effect=lambda: dict(values)
+            ),
+            patch.dict(os.environ),  # restores whatever the load sets
+        ):
+            yield values
+
+    def test_copies_new_values_and_never_overrides(self, dotenv):
+        os.environ["NOVA_TEST_SET"] = "process"
+        dotenv.update(
+            {"NOVA_TEST_NEW": "a", "NOVA_TEST_SET": "dotenv", "NOVA_TEST_BARE": None}
+        )
+
+        streamlit_app._load_dotenv()
+
+        assert os.environ["NOVA_TEST_NEW"] == "a"
+        assert os.environ["NOVA_TEST_SET"] == "process"  # like load_dotenv()
+        assert "NOVA_TEST_BARE" not in os.environ  # a bare `KEY` line has no value
+
+    @pytest.mark.parametrize(
+        "key",
+        [ALLOW_ANONYMOUS_ENV, ALLOW_ANONYMOUS_ENV.lower(), "Nova_Allow_Anonymous"],
+    )
+    def test_never_copies_the_opt_out(self, dotenv, key):
+        dotenv[key] = "1"
+
+        streamlit_app._load_dotenv()
+
+        assert not [k for k in os.environ if k.upper() == ALLOW_ANONYMOUS_ENV]
+
+    def test_opt_out_deleted_from_dotenv_without_a_restart_stays_blocked(
+        self, dotenv, mock_st
+    ):
+        # Two script runs in one process, as Streamlit reruns are, with the line
+        # deleted from .env in between — what the blocked app's operator message
+        # says to do. With no [auth], the second run must not open anonymously.
+        mock_st.get_option.return_value = {}
+        mock_st.user.to_dict.return_value = {}
+        _mock_secrets(mock_st, {})
+        dotenv.update({"NOVA_TEST_NEW": "a", ALLOW_ANONYMOUS_ENV: "1"})
+        problems = []
+        with patch.object(streamlit_app, "_authlib_installed", return_value=True):
+            for _ in range(2):
+                streamlit_app._load_dotenv()  # what each run does at module level
+                assert streamlit_app._access_gate() is None
+                assert mock_st.session_state["access_ok"] is False
+                problems.append(mock_st.session_state["access_problem_logged"])
+                dotenv.pop(ALLOW_ANONYMOUS_ENV, None)
+
+        assert problems == [PROBLEM_OPT_OUT_IN_DOTENV, PROBLEM_NOT_CONFIGURED]
+        mock_st.warning.assert_not_called()  # never the anonymous banner
+
+
 class TestSignOut:
     """The sidebar account block, Sign out, and the PHI purge behind it."""
 
-    def test_account_panel_escapes_the_email(self, mock_st):
+    def test_account_panel_shows_the_email_as_plain_text(self, mock_st):
         streamlit_app._account_panel("dr_smith@hospital.org")
 
+        # Not inside the caption: Markdown would autolink it, and the caption's 60%
+        # opacity dims that link below 4.5:1. st.text renders it verbatim (so no
+        # escaping), unlinked, at full opacity.
         assert mock_st.caption.call_args_list[0].args == (
-            ":material/account_circle: Signed in as dr\\_smith@hospital.org",
+            ":material/account_circle: Signed in as",
         )
+        mock_st.text.assert_called_once_with("dr_smith@hospital.org")
         mock_st.button.assert_called_once_with(
             "Sign out",
             key="sign_out",
@@ -2053,6 +2203,112 @@ class TestAccessRecheck:
         assert "audit_review" not in mock_st.session_state
 
 
+class TestSignInExpiry:
+    """The 12-hour sign-in limit holds where the gate does not run: the output
+    fragment, the review callbacks, and the download callable. A full run's gate
+    admits a sign-in; the clock then passes its expiry with no full run between."""
+
+    T0 = 1_800_000_000.0
+    EXPIRY = T0 - 60 + MAX_SESSION_AGE_SECONDS  # signed in a minute before T0
+
+    @pytest.fixture
+    def clock(self, mock_st, monkeypatch):
+        now = [self.T0]
+        monkeypatch.delenv(ALLOW_ANONYMOUS_ENV, raising=False)
+        mock_st.get_option.return_value = {}
+        _mock_secrets(mock_st, {"auth": dict(AUTH), "access": dict(ACCESS)})
+        mock_st.user.to_dict.return_value = _signed_in(iat=self.T0 - 60)
+        with (
+            patch.object(streamlit_app, "time", SimpleNamespace(time=lambda: now[0])),
+            patch.object(streamlit_app, "_authlib_installed", return_value=True),
+            patch.object(streamlit_app, "_dotenv_has_opt_out", return_value=False),
+        ):
+            assert streamlit_app._access_gate() is not None  # the full run
+            assert mock_st.session_state["access_expires_at"] == self.EXPIRY
+            mock_st.reset_mock()
+            yield now
+
+    @staticmethod
+    def _render_output():
+        inspect.unwrap(streamlit_app._render_output)()
+
+    def test_output_renders_until_the_expiry(self, mock_st, clock):
+        clock[0] = self.EXPIRY  # the gate's own boundary: still fresh
+
+        self._render_output()
+
+        mock_st.caption.assert_any_call(":material/description: Transcript")
+        mock_st.rerun.assert_not_called()
+
+    def test_output_reruns_the_whole_app_once_expired(self, mock_st, clock):
+        mock_st.session_state["responses"] = [("a.wav", MagicMock())]
+        clock[0] = self.EXPIRY + 1
+
+        self._render_output()
+
+        # Nothing renders; the full rerun's gate then asks for a new sign-in.
+        assert mock_st.mock_calls == [call.rerun(scope="app")]
+
+    def test_review_callbacks_are_inert_once_expired(self, mock_st, clock, capsys):
+        mock_st.session_state.update(
+            {"responses": [("a.wav", MagicMock())], f"reviewed_{RUN_ID}_0": True}
+        )
+        clock[0] = self.EXPIRY + 1
+
+        streamlit_app._on_review(RUN_ID, 0)
+        streamlit_app._on_edit(RUN_ID, 0)
+
+        assert mock_st.session_state[f"reviewed_{RUN_ID}_0"] is True
+        assert "audit_review" not in mock_st.session_state
+        events = [line["event"] for line in audit_lines(capsys.readouterr().out)]
+        assert "review_signed_off" not in events and "review_reopened" not in events
+
+    def _build(self, mock_st):
+        # Rendered, reviewed and unlocked, before the expiry.
+        streamlit_app._transcript_download(
+            [("Jane_Doe_MRN12345.wav", MagicMock())],
+            [("Patient Jane Doe reports rash on left forearm.", True)],
+            RUN_ID,
+        )
+        return mock_st.download_button.call_args.args[1]
+
+    def test_download_works_until_the_expiry(self, mock_st, clock):
+        build = self._build(mock_st)
+        clock[0] = self.EXPIRY
+
+        with patch.object(streamlit_app, "st", Mock(spec=[])):
+            assert build().startswith("Jane_Doe_MRN12345.wav\n")
+
+    def test_download_clicked_after_the_expiry_is_refused(self, mock_st, clock, capsys):
+        # A click reruns nothing (on_click="ignore"), so the callable checks itself —
+        # from values captured at render, never st.* (a spec=[] Mock).
+        build = self._build(mock_st)
+        capsys.readouterr()
+        clock[0] = self.EXPIRY + 1
+
+        with (
+            patch.object(streamlit_app, "st", Mock(spec=[])),
+            pytest.raises(PermissionError) as exc,
+        ):
+            build()
+
+        assert str(exc.value) == streamlit_app.DOWNLOAD_EXPIRED
+        _assert_no_phi(str(exc.value))  # Streamlit logs it with a traceback
+        assert capsys.readouterr().out == ""  # no file, so no transcript_downloaded
+
+    @pytest.mark.parametrize("expires_at", ["soon", True, float("nan")])
+    def test_an_unreadable_expiry_counts_as_expired(self, mock_st, expires_at):
+        mock_st.session_state["access_expires_at"] = expires_at
+
+        assert streamlit_app._access_ok() is False
+
+    def test_an_anonymous_session_never_expires(self, mock_st):
+        mock_st.session_state["access_expires_at"] = None
+
+        with patch.object(streamlit_app, "time", SimpleNamespace(time=lambda: 1e12)):
+            assert streamlit_app._access_ok() is True
+
+
 class TestBareImport:
     """`import streamlit_app` runs the module-level access gate in bare mode, where
     `st.stop()` is a no-op, so everything after the gate must tolerate either
@@ -2133,8 +2389,9 @@ class TestAppSmoke:
       applied edit exported in place of Deepgram's text; the reviewed editor frozen
       (kept across a rerun, refusing input, and dropping a forged value — with an
       enabled-editor control); unchecking re-locks; an edit + check in one rerun
-      leaves it unchecked; and a new ``run_id`` reseeds everything and purges the old
-      keys. Deferred ``data`` callables are recorded via ``MediaFileManager.
+      keeps the edit but leaves it unchecked, with a toast saying so; the download
+      row sits above the editor; and a new ``run_id`` reseeds everything and purges
+      the old keys. Deferred ``data`` callables are recorded via ``MediaFileManager.
       add_deferred``, since AppTest never executes them.
     - **seeded flat** — the non-diarized render branch: an escaped transcript with
       no speaker labels, its one low-confidence word in bold orange under the legend
@@ -2143,8 +2400,9 @@ class TestAppSmoke:
       injected ``test@example.com`` has no ``is_logged_in``): only the Sign in button
       and prompt render — no inputs, no output, no Run — and the opt-out is ignored.
     - **signed in, allowed** — the app renders with the account block in the
-      sidebar; then **Sign out** purges the session's results, review state, and
-      inputs (rotating ``input_nonce``) and stops at the sign-in screen.
+      sidebar (the email as plain ``st.text``); then **Sign out** purges the
+      session's results, review state, and the nonce-keyed inputs (rotating
+      ``input_nonce``) and stops at the sign-in screen.
     - **signed in, denied** — an email outside the allowlist: the refusal and a
       Sign out button, nothing else.
     - **no-key state** — clears ``DEEPGRAM_API_KEY`` so the key-required warning and
@@ -2371,6 +2629,11 @@ dl = seeded.download_button[0]
 assert dl.disabled and "Reviewed" in dl.help, (dl.disabled, dl.help)
 assert dl.label == "Download locked — 0/1 reviewed", dl.label
 assert not dl.proto.deferred_file_id  # data="" while locked: nothing to fetch
+# The download row renders ABOVE the panel (above the fold OUTPUT_HEIGHT was sized
+# for) even though it is filled after the review widgets it reads.
+order = []
+_widget_keys_in_order(seeded.main.columns[1], order)
+assert order.index("download_transcripts") < order.index("transcript_" + RUN_ID + "_0"), order
 
 # An applied edit leaves it unreviewed; checking Reviewed unlocks Download and
 # freezes the editor, and the export is the edited text, not Deepgram's.
@@ -2411,12 +2674,19 @@ _forge(seeded.text_area[0], "CONTROL")
 seeded.run()
 assert seeded.text_area[0].value == "CONTROL", seeded.text_area[0].value
 
-# An edit and a check landing in the same rerun: the edit clears the check.
+# An edit and a check landing in the same rerun — in a browser, typing then clicking
+# Reviewed, since the click is the blur that applies the edit: the edit is kept, the
+# check is cleared, and a toast says to check it again. (Kept checked, the editor
+# would render disabled this run and Streamlit would drop the edit.)
 seeded.text_area[0].input(EDITED)
 seeded.checkbox[0].check()
 seeded.run()
 assert not seeded.exception, seeded.exception
 assert seeded.checkbox[0].value is False and seeded.download_button[0].disabled
+assert seeded.text_area[0].value == EDITED and not seeded.text_area[0].disabled
+assert [t.value for t in seeded.toast] == [
+    "Edit applied, so Reviewed was cleared — check it again to sign off."
+], [t.value for t in seeded.toast]
 
 # A new Run (a full rerun under a new run_id) starts over: a freshly seeded,
 # editable editor, an unchecked box, and the old run's keys purged.
@@ -2467,13 +2737,20 @@ with _signed_in_as("Dr@Hospital.org"):
     signed.run()
 assert not signed.exception, signed.exception
 assert any(b.label == "Run" for b in signed.button), [b.label for b in signed.button]
-assert any("dr@hospital.org" in c.value for c in signed.sidebar.caption), [c.value for c in signed.sidebar.caption]
+# The email is plain full-opacity text under the caption, never an autolinked,
+# caption-dimmed mailto link.
+assert any(c.value.endswith("Signed in as") for c in signed.sidebar.caption), [c.value for c in signed.sidebar.caption]
+assert [t.value for t in signed.sidebar.text] == ["dr@hospital.org"], [t.value for t in signed.sidebar.text]
+assert not any("dr@hospital.org" in c.value for c in signed.sidebar.caption)
 assert [b.label for b in signed.sidebar.button if b.label == "Sign out"] == ["Sign out"]
 assert not signed.warning, [w.value for w in signed.warning]
 assert signed.text_area and signed.checkbox  # results render for a signed-in session
 
 # Sign out: the callback purges the session's PHI, then st.logout() clears the
-# sign-in, so the same rerun stops at the sign-in screen.
+# sign-in, so the same rerun stops at the sign-in screen. The uploader and recorder
+# are keyed by input_nonce (0 until the first sign-out), so their state is there to
+# purge — which makes the "not in" checks below meaningful.
+assert "uploads_0" in signed.session_state and "recording_0" in signed.session_state
 signed.button(key="sign_out").click().run()
 assert not signed.exception, signed.exception
 assert [b.label for b in signed.button] == ["Sign in"], [b.label for b in signed.button]
