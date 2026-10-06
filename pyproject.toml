@@ -1,5 +1,5 @@
 [project]
-name = "deepgram-medical-transcription"
+name = "deepgram-clinical-transcription"
 # Bumping this IS the release trigger: land the change on main and release.yml
 # gates on CI, creates the vX.Y.Z tag, and publishes the GitHub Release. Keep it
 # static and plain X.Y.Z — the workflow refuses anything else, and

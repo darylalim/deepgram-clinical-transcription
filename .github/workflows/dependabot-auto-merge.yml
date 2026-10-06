@@ -35,7 +35,7 @@ jobs:
     # guard keeps a fork from auto-merging on its own copy of this workflow.
     if: >-
       github.event.pull_request.user.login == 'dependabot[bot]' &&
-      github.repository == 'darylalim/deepgram-medical-transcription'
+      github.repository == 'darylalim/deepgram-clinical-transcription'
     steps:
       # Also the integrity check: by default this step fails unless the branch
       # carries only Dependabot-authored commits, so a commit pushed onto the
