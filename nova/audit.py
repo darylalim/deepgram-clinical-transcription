@@ -37,13 +37,17 @@ from nova.config import (
     DEFAULT_DIARIZE,
     DEFAULT_DICTATION,
     DEFAULT_MEASUREMENTS,
+    DEFAULT_MODEL,
     DEFAULT_SMART_FORMAT,
     LANGUAGES,
+    MODELS,
     REDACT_GROUPS,
 )
 
 LOGGER_NAME = "nova.audit"
-SCHEMA_VERSION = 1
+# Bump on any change to an event's field set; consumers may check exact fields.
+# 2: transcription_run gained `model`.
+SCHEMA_VERSION = 2
 # The handler is found again by NAME, not isinstance: Streamlit re-imports nova/ on a
 # source change (hot reload), which defines a new handler class while the process-wide
 # logger keeps the old handler — an isinstance guard would then add a second one.
@@ -96,6 +100,10 @@ def _token(name: str, value: object) -> str:
     if not isinstance(value, str) or not _HEX32.fullmatch(value):
         raise AuditSchemaError(name)
     return value
+
+
+def _model(name: str, value: object) -> str:
+    return _member(name, value, MODELS)
 
 
 def _language(name: str, value: object) -> str | None:
@@ -152,6 +160,7 @@ class RunOptions:
     """The auditable projection of the Features options: flags and counts only —
     keyterms become `n_keyterms`, so their text never enters the audit layer."""
 
+    model: str
     language: str | None
     smart_format: bool
     diarize: bool
@@ -214,6 +223,7 @@ class _Spec:
 
 
 _RUN_OPTION_FIELDS: dict[str, _Check] = {
+    "model": _model,
     "language": _language,
     "smart_format": _flag,
     "diarize": _flag,
@@ -296,6 +306,7 @@ def _run_outcome(n_items: int, n_ok: int) -> Outcome:
 
 def run_options(
     *,
+    model: str = DEFAULT_MODEL,
     keyterms: list[str] | None = None,
     language: str | None = None,
     smart_format: bool = DEFAULT_SMART_FORMAT,
@@ -308,7 +319,8 @@ def run_options(
 
     Mirrors `build_options`' signature (pinned by a test), so the UI passes it the
     same `_feature_opts()` dict and a misspelled key raises TypeError. Keyterms are
-    reduced to a count; the language must be a known one (or unset); redact groups
+    reduced to a count; the model must be a known one; the language must be a known
+    one (or unset); redact groups
     must be known and come back sorted; the four toggles must be real bools.
     """
     if keyterms is not None and not isinstance(keyterms, list | tuple):
@@ -317,6 +329,7 @@ def run_options(
         raise AuditSchemaError("redact")
     groups = {_member("redact", group, REDACT_GROUPS) for group in redact or ()}
     return RunOptions(
+        model=_model("model", model),
         language=_language("language", language or None),
         smart_format=_flag("smart_format", smart_format),
         diarize=_flag("diarize", diarize),
@@ -394,6 +407,7 @@ def transcription_run(
         n_ok=n_ok,
         n_failed=n_items - n_ok,
         n_skipped=n_skipped,
+        model=options.model,
         language=options.language,
         smart_format=options.smart_format,
         diarize=options.diarize,

@@ -1,8 +1,16 @@
 """Transcription constants — the single source of truth for the Streamlit UI."""
 
-MODEL = "nova-3-medical"
+# Deepgram `model` values -> display names (also shown on each result and in the export).
+# Medical is the default: Pharma is tuned for drug names (pharmacy calls, refills), so
+# general clinical encounters stay on Medical.
+MODELS = {
+    "nova-3-medical": "Nova-3 Medical",
+    "nova-3-pharma": "Nova-3 Pharma",
+}
+DEFAULT_MODEL = next(iter(MODELS))
 
-# Nova-3 Medical supports English variants only.
+# Both models accept exactly these English variants (Pharma is English-only; Medical's
+# `multi` code-switching is not offered), so the list does not depend on the model.
 LANGUAGES = {
     "en": "English",
     "en-US": "English (US)",

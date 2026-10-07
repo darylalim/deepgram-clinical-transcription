@@ -66,6 +66,17 @@ class TestProcessInputs:
 
         assert mock_st.session_state["audio_sources"] == [b"a", b"b"]
 
+    @pytest.mark.parametrize(
+        ("opts", "model"),
+        [({}, "nova-3-medical"), ({"model": "nova-3-pharma"}, "nova-3-pharma")],
+    )
+    def test_records_the_runs_model(self, mock_deepgram_cls, mock_st, opts, model):
+        # Kept per run, so the panel and export name the model the audio was sent to
+        # even after the sidebar selection changes.
+        streamlit_app._process_inputs("test-key", [("a.wav", b"a")], **opts)
+
+        assert mock_st.session_state["run_model"] == model
+
     def test_forwards_features_to_sdk_call(self, mock_deepgram_cls, mock_st):
         # The wrapper forwards each feature kwarg by name through build_options to the SDK
         # call; a forwarding typo (e.g. swapping diarize/measurements) would slip past the
@@ -73,6 +84,7 @@ class TestProcessInputs:
         streamlit_app._process_inputs(
             "test-key",
             [("test.wav", FAKE_AUDIO)],
+            model="nova-3-pharma",
             keyterms=["metformin"],
             language="en-GB",
             diarize=True,
@@ -82,6 +94,7 @@ class TestProcessInputs:
         )
 
         kwargs = mock_deepgram_cls.return_value.listen.v1.media.transcribe_file.call_args.kwargs
+        assert kwargs["model"] == "nova-3-pharma"
         assert kwargs["keyterm"] == ["metformin"]
         assert kwargs["language"] == "en-GB"
         assert kwargs["diarize_model"] == "latest"
@@ -470,6 +483,7 @@ class TestRunAudit:
                 "n_failed",
                 "n_skipped",
                 "n_keyterms",
+                "model",
                 "language",
                 "redact",
             )
@@ -483,6 +497,7 @@ class TestRunAudit:
             "n_failed": 1,
             "n_skipped": 0,
             "n_keyterms": 1,
+            "model": "nova-3-medical",
             "language": "en",
             "redact": [],
         }
@@ -581,10 +596,11 @@ class TestRunAudit:
         mock_deepgram_cls.assert_not_called()
         assert capsys.readouterr().out == ""
 
+    @pytest.mark.parametrize("key", ["model", "language"])
     def test_unknown_option_fails_before_any_audio_is_sent(
-        self, mock_deepgram_cls, mock_st, capsys
+        self, key, mock_deepgram_cls, mock_st, capsys
     ):
-        mock_st.session_state["language"] = "Jane_Doe_MRN12345"
+        mock_st.session_state[key] = "Jane_Doe_MRN12345"
 
         with pytest.raises(AuditSchemaError) as exc:
             streamlit_app._run("key", [mock_upload("a.wav", b"a")], None)
@@ -1185,6 +1201,7 @@ class TestReviewAudit:
 class TestFeatureOpts:
     def test_defaults_when_session_empty(self, mock_st):
         assert streamlit_app._feature_opts() == {
+            "model": "nova-3-medical",
             "keyterms": [],
             "language": "en",
             "smart_format": True,
@@ -1197,6 +1214,7 @@ class TestFeatureOpts:
     def test_reads_values_from_session_state(self, mock_st):
         mock_st.session_state.update(
             {
+                "model": "nova-3-pharma",
                 "keyterms": ["metformin"],
                 "language": "en-GB",
                 "smart_format": False,
@@ -1208,6 +1226,7 @@ class TestFeatureOpts:
         )
 
         assert streamlit_app._feature_opts() == {
+            "model": "nova-3-pharma",
             "keyterms": ["metformin"],
             "language": "en-GB",
             "smart_format": False,
@@ -1221,6 +1240,7 @@ class TestFeatureOpts:
         mock_st.session_state.update({"language": "en-GB", "diarize": True})
 
         assert streamlit_app._feature_opts() == {
+            "model": "nova-3-medical",
             "keyterms": [],
             "language": "en-GB",
             "smart_format": True,
@@ -1399,6 +1419,27 @@ class TestTranscriptDownload:
 
         build = mock_st.download_button.call_args.args[1]
         assert build() == "a.wav\nAlpha, edited.\n\nb.wav\nBeta."
+
+    def test_export_names_the_runs_model_as_captured_at_render(self, mock_st):
+        mock_st.session_state["run_model"] = "nova-3-pharma"
+        streamlit_app._transcript_download(
+            [("a.wav", MagicMock())], [("Text.", True)], RUN_ID
+        )
+        build = mock_st.download_button.call_args.args[1]
+
+        mock_st.session_state["run_model"] = "nova-3-medical"
+        with patch.object(streamlit_app, "st", Mock(spec=[])):
+            assert build() == "Model: Deepgram Nova-3 Pharma\n\na.wav\nText."
+
+    @pytest.mark.parametrize("run_model", [None, "Jane_Doe_MRN12345"])
+    def test_export_omits_an_unknown_model(self, mock_st, run_model):
+        mock_st.session_state["run_model"] = run_model
+        streamlit_app._transcript_download(
+            [("a.wav", MagicMock())], [("Text.", True)], RUN_ID
+        )
+
+        build = mock_st.download_button.call_args.args[1]
+        assert build() == "a.wav\nText."
 
     def test_deferred_export_uses_render_time_text_and_no_st(self, mock_st):
         # Streamlit runs the callable on click, on a worker thread with no
@@ -2091,6 +2132,7 @@ class TestSignOut:
                 "responses": [("a.wav", MagicMock())],
                 "audio_sources": [b"a"],
                 "run_id": RUN_ID,
+                "run_model": "nova-3-pharma",
                 "keyterms": ["Jane Doe"],
                 f"transcript_{RUN_ID}_0": "Patient text.",
                 f"reviewed_{RUN_ID}_0": True,
@@ -2177,6 +2219,35 @@ class TestAccessRecheck:
         assert mock_st.mock_calls == []
 
     def test_output_renders_with_access(self, mock_st):
+        self._render_output()
+
+        mock_st.caption.assert_any_call(":material/description: Transcript")
+
+    def test_header_names_the_runs_model(self, mock_st):
+        mock_st.session_state.update(
+            {
+                "responses": [("a.wav", MagicMock())],
+                "audio_sources": [None],
+                "run_id": RUN_ID,
+                "run_model": "nova-3-pharma",
+            }
+        )
+
+        # Only the header is under test here; the panel and download have their own.
+        with (
+            patch.object(streamlit_app, "_output_panel", return_value=[]),
+            patch.object(streamlit_app, "_transcript_download"),
+        ):
+            self._render_output()
+
+        mock_st.caption.assert_any_call(
+            ":material/description: Transcript · Nova-3 Pharma"
+        )
+
+    def test_header_names_no_model_without_results(self, mock_st):
+        # A stale run_model with nothing to show must not label the placeholder.
+        mock_st.session_state["run_model"] = "nova-3-pharma"
+
         self._render_output()
 
         mock_st.caption.assert_any_call(":material/description: Transcript")
@@ -2581,11 +2652,12 @@ captions = [c.value for c in output.caption]
 assert captions[0] == ":material/description: Transcript", captions
 assert any("Select audio, then click Run" in c for c in captions[1:]), captions
 
-# Features live in the sidebar and render in the intended order: inputs (Language,
-# Keyterm) first, the four toggles grouped, Redact deliberately last.
+# Features live in the sidebar and render in the intended order: inputs (Model,
+# Language, Keyterm) first, the four toggles grouped, Redact deliberately last.
 order = []
 _widget_keys_in_order(at.sidebar, order)
 assert [k for k in order if not k.startswith("FormSubmitter")] == [
+    "model",
     "language",
     "keyterms",
     "smart_format",
@@ -2808,7 +2880,7 @@ assert not closed.main.columns
         # The audit trail is stdout, one JSON object per line — and nothing else is
         # printed there under AppTest (no welcome banner), so every line must be one.
         stdout = [line for line in result.stdout.splitlines() if line.strip()]
-        assert all(line.startswith('{"v":1') for line in stdout), stdout
+        assert all(line.startswith('{"v":2') for line in stdout), stdout
         sessions: dict[str, list[dict]] = {}
         for line in stdout:
             event = json.loads(line)

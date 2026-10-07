@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/darylalim/deepgram-clinical-transcription/actions/workflows/ci.yml/badge.svg)](https://github.com/darylalim/deepgram-clinical-transcription/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Streamlit application for medical transcription using Deepgram's Nova-3 Medical model (English-only), built on a framework-free core (`nova/`) that handles option building, batching, and response parsing.
+Streamlit application for medical transcription using Deepgram's Nova-3 Medical and Nova-3 Pharma models (English-only), built on a framework-free core (`nova/`) that handles option building, batching, and response parsing.
 
 > **Reference implementation — not certified for clinical use.** You are responsible for your own Deepgram BAA and PHI handling before any real patient data flows through this app. See [License](#license).
 
@@ -17,7 +17,7 @@ Streamlit application for medical transcription using Deepgram's Nova-3 Medical 
 
 - **Sign-in** — OpenID Connect through Streamlit's `st.login` (Google Workspace, Microsoft Entra ID, Okta, …), limited to allowlisted email domains and verified emails, with a 12-hour session limit. The gate fails closed: a missing or broken configuration blocks the app instead of opening it. See [Access control](#access-control).
 - **Batch transcription** from two input sources — upload files or record from the microphone.
-- **Nova-3 Medical** speech-to-text across eight English variants.
+- **Nova-3 Medical** or **Nova-3 Pharma** speech-to-text across eight English variants.
 - **Keyterm prompting** — boost recognition of specialized vocabulary (drug names, procedures).
 - **Speaker diarization** with color-coded per-speaker transcript lines.
 - **Low-confidence flags** — words Deepgram scored below 90% confidence are shown in **bold orange**, with a per-result count, so review starts where the model was least sure.
@@ -63,13 +63,16 @@ The app first asks you to **sign in** (unless you launched it in anonymous mode)
 
 A **Features** panel in the left sidebar holds the request options, closed by a **Run** button. If you populate both input tabs, Run transcribes a single one by priority — **Upload, then Record** — and shows a notice naming which ran and which was ignored.
 
-- **Language** — English variants (Nova-3 Medical is English-only)
+- **Model** — **Nova-3 Medical** (default) for clinician–patient encounters and dictation, or **Nova-3 Pharma**, tuned for drug names (pharmacy calls, refill requests). Both accept the same eight English variants
+- **Language** — English variants (both models are English-only here)
 - **Keyterm Prompting** — type specialized vocabulary (drug names, procedures, names), Enter to add each, up to 100, to boost recognition
 - **Smart Format** (on by default) — punctuation, paragraph breaks, and entity formatting
 - **Diarize** (off by default) — labels speaker turns as Speaker 1, Speaker 2, … in the transcript (speakers are numbered, not named by role); use it for clinician–patient encounters
 - **Dictation** (off by default) — turns spoken commands like "period" / "new paragraph" into punctuation (also enables punctuation); for a single clinician dictating, not encounters. Run warns when Dictation and Diarize are both on
 - **Measurements** (off by default) — abbreviates spoken units (e.g. "five milligrams" → "5 mg"). Volumes come out as lowercase "ml" / "l", which [ISMP](https://www.ismp.org/recommendations/error-prone-abbreviations-list) lists as error-prone (use mL / L), so review volumes before clinical use
 - **Redact** (none by default) — replaces selected information with redaction tags. Four groups are selectable: **PII** de-identifies (names, locations, IDs); **PHI** removes clinical content itself (conditions, drugs, injuries); **PCI** redacts card numbers; **Numbers** redacts any run of three or more digits plus Deepgram's number-like entities (e.g. dates, times, ages, phone and account numbers, medical statistics, locations) — so clinical values are redacted unpredictably ("500 mg" always, shorter doses, vitals, and lab values only sometimes).
+
+The model each Run used is shown in the Transcript header and as the first line of the downloaded file, so changing the selection afterwards cannot mislabel a result.
 
 Once a request runs:
 
@@ -159,16 +162,16 @@ The app records who did what, and when, as one JSON object per line on the serve
 | `session_start` | a browser session passes the sign-in gate (after a sign-in, this is the login record) | `success` | — |
 | `access_denied` | a signed-in account is refused, or sign-in is unavailable | `denied` | `reason` |
 | `logout` | **Sign out** is clicked | `success` | — |
-| `transcription_run` | a **Run** sends audio to Deepgram | `success`, `partial`, or `failure` | `run`, `input_kind`, `n_items`, `n_ok`, `n_failed`, `n_skipped`, `language`, `smart_format`, `diarize`, `dictation`, `measurements`, `redact`, `n_keyterms` |
+| `transcription_run` | a **Run** sends audio to Deepgram | `success`, `partial`, or `failure` | `run`, `input_kind`, `n_items`, `n_ok`, `n_failed`, `n_skipped`, `model`, `language`, `smart_format`, `diarize`, `dictation`, `measurements`, `redact`, `n_keyterms` |
 | `transcription_rejected` | a **Run** is refused before any audio is sent (too many files, all too large, a recording that is unreadable or too long) | `rejected` | `input_kind`, `reason`, `n_items` |
 | `review_signed_off` | a result is marked **Reviewed against the audio** | `success` | `run`, `result_index`, `n_results`, `edited`, `n_flagged` |
 | `review_reopened` | a reviewed result is made unreviewed again | `success` | `run`, `result_index`, `n_results` |
 | `transcript_downloaded` | a download file is generated (every click) | `success` | `run`, `n_results`, `n_edited` |
 
-Every line starts with the same envelope, in this order: `v` (schema version, `1`), `ts` (UTC, milliseconds), `event`, `outcome`, `user`, `auth`, `session`. For example:
+Every line starts with the same envelope, in this order: `v` (schema version, `2` — bumped from `1` when `transcription_run` gained `model`), `ts` (UTC, milliseconds), `event`, `outcome`, `user`, `auth`, `session`. For example:
 
 ```json
-{"v":1,"ts":"2026-09-28T14:03:12.345Z","event":"transcription_run","outcome":"partial","user":"dr.smith@hospital.org","auth":"oidc","session":"<32 hex>","run":"<32 hex>","input_kind":"upload","n_items":3,"n_ok":2,"n_failed":1,"n_skipped":1,"language":"en-US","smart_format":true,"diarize":true,"dictation":false,"measurements":false,"redact":["numbers","pii"],"n_keyterms":2}
+{"v":2,"ts":"2026-09-28T14:03:12.345Z","event":"transcription_run","outcome":"partial","user":"dr.smith@hospital.org","auth":"oidc","session":"<32 hex>","run":"<32 hex>","input_kind":"upload","n_items":3,"n_ok":2,"n_failed":1,"n_skipped":1,"model":"nova-3-medical","language":"en-US","smart_format":true,"diarize":true,"dictation":false,"measurements":false,"redact":["numbers","pii"],"n_keyterms":2}
 ```
 
 - **Who.** `user` is the signed-in email (`auth` `oidc`), `anonymous` in anonymous mode, or null (`auth` `none`) when sign-in is unavailable. A refused account's email is recorded in its `access_denied` line. `session` is a random id per browser session, and `run` is a random id per Run that links it to its sign-offs and downloads. `result_index` is a result's position in the batch, starting at 0.

@@ -11,14 +11,15 @@ from nova.config import (
     DEFAULT_DIARIZE,
     DEFAULT_DICTATION,
     DEFAULT_MEASUREMENTS,
+    DEFAULT_MODEL,
     DEFAULT_SMART_FORMAT,
     MAX_CONCURRENCY,
-    MODEL,
 )
 
 
 def build_options(
     *,
+    model: str = DEFAULT_MODEL,
     keyterms: list[str] | None = None,
     language: str | None = None,
     smart_format: bool = DEFAULT_SMART_FORMAT,
@@ -29,7 +30,7 @@ def build_options(
 ) -> dict[str, Any]:
     """Build the kwargs dict passed to the Deepgram transcribe call.
 
-    `model` and `smart_format` are always sent; off-by-default features are sent only
+    `model` (a `MODELS` key) and `smart_format` are always sent; off-by-default features are sent only
     when enabled (Deepgram defaults them off). Dictation requires punctuation, so it
     forces `punctuate=True`. `redact` (typed as a single str by the SDK) goes through
     `request_options` as repeated query params, which is omitted entirely when unset.
@@ -38,7 +39,7 @@ def build_options(
     if redact:
         request_options["additional_query_parameters"] = {"redact": redact}
     return {
-        "model": MODEL,
+        "model": model,
         "smart_format": smart_format,
         # `diarize_model` replaces the deprecated `diarize=true` (a request with both is
         # rejected); "latest" tracks Deepgram's current diarizer.
@@ -54,6 +55,7 @@ def build_options(
 
 def option_warnings(
     *,
+    model: str = DEFAULT_MODEL,
     keyterms: list[str] | None = None,
     language: str | None = None,
     smart_format: bool = DEFAULT_SMART_FORMAT,
