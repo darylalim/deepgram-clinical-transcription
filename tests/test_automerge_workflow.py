@@ -129,6 +129,23 @@ def test_major_bumps_are_never_auto_merged(workflow: dict) -> None:
         assert "!=" in condition, "major check must be an exclusion"
 
 
+def test_only_github_actions_bumps_are_auto_merged(workflow: dict) -> None:
+    # Python (uv) bumps change production code — including sign-in (authlib,
+    # cryptography) — and CI mocks Deepgram and the identity provider, so they must
+    # always wait for a human. fetch-metadata reports the branch's ecosystem
+    # segment, so the exact value is `github_actions` (underscore).
+    merge_steps = [s for s in _steps(workflow) if "gh pr merge" in s.get("run", "")]
+    assert merge_steps, "no `gh pr merge` step found"
+    for step in merge_steps:
+        condition = step.get("if", "")
+        assert (
+            "steps.metadata.outputs.package-ecosystem == 'github_actions'" in condition
+        ), f"merge step must be limited to github_actions, got if: {condition!r}"
+        assert "&&" in condition and "||" not in condition, (
+            "the ecosystem and major checks must both hold"
+        )
+
+
 def test_merge_step_queues_behind_required_checks(workflow: dict) -> None:
     joined = "\n".join(_run_steps(workflow))
     assert "gh pr merge" in joined

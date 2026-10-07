@@ -33,14 +33,15 @@ def config() -> dict:
     return yaml.safe_load(DEPENDABOT.read_text(encoding="utf-8"))
 
 
-def _github_actions_update(config: dict) -> dict:
+def _update(config: dict, ecosystem: str) -> dict:
     for update in config.get("updates", []):
-        if (
-            isinstance(update, dict)
-            and update.get("package-ecosystem") == "github-actions"
-        ):
+        if isinstance(update, dict) and update.get("package-ecosystem") == ecosystem:
             return update
-    raise AssertionError("no github-actions update entry in dependabot.yml")
+    raise AssertionError(f"no {ecosystem} update entry in dependabot.yml")
+
+
+def _github_actions_update(config: dict) -> dict:
+    return _update(config, "github-actions")
 
 
 def test_config_is_valid_v2(config: dict) -> None:
@@ -68,3 +69,19 @@ def test_github_actions_updates_are_scheduled(config: dict) -> None:
     schedule = update.get("schedule")
     assert isinstance(schedule, dict), "github-actions update needs a schedule"
     assert schedule.get("interval"), "schedule must set an interval"
+
+
+def test_python_dependencies_are_tracked_from_the_root(config: dict) -> None:
+    # The uv ecosystem reads pyproject.toml + uv.lock at the repo root; without
+    # this entry, releases of authlib / cryptography / streamlit (sign-in and the
+    # app itself) are tracked by hand. Auto-merge never applies to these
+    # (test_automerge_workflow.py::test_only_github_actions_bumps_are_auto_merged).
+    update = _update(config, "uv")
+    raw = update.get("directories")
+    raw = raw if raw is not None else update.get("directory")
+    dirs = raw if isinstance(raw, list) else [raw]
+    assert "/" in dirs, f"uv updates must be rooted at '/', got {dirs!r}"
+    schedule = update.get("schedule")
+    assert isinstance(schedule, dict) and schedule.get("interval"), (
+        "uv update needs a schedule.interval"
+    )
