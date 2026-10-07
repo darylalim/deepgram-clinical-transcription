@@ -2627,7 +2627,7 @@ def _widget_keys_in_order(node, acc):
 #    selected.
 at = AppTest.from_file(app, default_timeout=30).run()
 assert not at.exception, at.exception
-assert at.title[0].value == "Deepgram Medical Transcription"
+assert at.title[0].value == "Deepgram Clinical Transcription"
 assert any("Select audio, then click Run" in c.value for c in at.caption), [c.value for c in at.caption]
 run = [b for b in at.button if b.label == "Run"]
 assert run and run[0].disabled, "Run should be disabled with no audio input"

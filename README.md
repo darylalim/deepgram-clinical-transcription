@@ -1,8 +1,8 @@
-# Deepgram Medical Transcription
+# Deepgram Clinical Transcription
 
 [![CI](https://github.com/darylalim/deepgram-clinical-transcription/actions/workflows/ci.yml/badge.svg)](https://github.com/darylalim/deepgram-clinical-transcription/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Streamlit application for medical transcription using Deepgram's Nova-3 Medical and Nova-3 Pharma models (English-only), built on a framework-free core (`nova/`) that handles option building, batching, and response parsing.
+Streamlit application for clinical transcription using Deepgram's Nova-3 Medical and Nova-3 Pharma models (English-only), built on a framework-free core (`nova/`) that handles option building, batching, and response parsing.
 
 > **Reference implementation — not certified for clinical use.** You are responsible for your own Deepgram BAA and PHI handling before any real patient data flows through this app. See [License](#license).
 

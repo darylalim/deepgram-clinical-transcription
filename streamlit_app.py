@@ -1092,12 +1092,12 @@ def _render_output() -> None:
 
 
 st.set_page_config(
-    page_title="Deepgram Medical Transcription",
+    page_title="Deepgram Clinical Transcription",
     page_icon="🩺",
     layout="wide",
 )
 
-st.title("Deepgram Medical Transcription")
+st.title("Deepgram Clinical Transcription")
 st.caption(
     "Transcribe clinical audio with Deepgram's Nova-3 Medical or Pharma model — "
     "speaker labels, measurement formatting, and PII/PHI redaction."
