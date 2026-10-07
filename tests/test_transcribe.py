@@ -18,6 +18,7 @@ class TestBuildOptions:
         opts = build_options()
         for absent in (
             "diarize",
+            "diarize_model",
             "measurements",
             "dictation",
             "punctuate",
@@ -31,7 +32,9 @@ class TestBuildOptions:
         assert build_options(smart_format=False)["smart_format"] is False
 
     def test_diarize_on(self):
-        assert build_options(diarize=True)["diarize"] is True
+        opts = build_options(diarize=True)
+        assert opts["diarize_model"] == "latest"
+        assert "diarize" not in opts  # deprecated; sending both is rejected
 
     def test_measurements_on(self):
         assert build_options(measurements=True)["measurements"] is True
@@ -120,7 +123,7 @@ class TestTranscribeBatch:
                 "url": "u",
                 "model": "nova-3-medical",
                 "smart_format": True,
-                "diarize": True,
+                "diarize_model": "latest",
                 "keyterm": ["x"],
             }
 
