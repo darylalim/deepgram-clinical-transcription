@@ -781,7 +781,7 @@ def _audit_review(run_id: str, index: int) -> None:
     (`audit_review`: the run id and the indexes logged as signed off), so the log
     follows the state, not the callbacks. That matters when an edit and a check land
     in the same rerun: Streamlit does not guarantee the two callbacks' order (1.64
-    runs the editor's first), and `_on_edit` then clears the check. Checkbox-first
+    and 1.65 run the editor's first), and `_on_edit` then clears the check. Checkbox-first
     logs signed-off then reopened; editor-first leaves the flag where it started and
     logs nothing — never a "reopened" for a sign-off that was never recorded.
     `edited` compares the editor's text with Deepgram's plain transcript.

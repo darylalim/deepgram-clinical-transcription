@@ -1162,7 +1162,7 @@ class TestReviewAudit:
         ]
 
     def test_an_edit_first_in_the_same_rerun_logs_nothing(self, session, capsys):
-        # Editor callback first (what Streamlit 1.64 does): the check arrived, the
+        # Editor callback first (what Streamlit 1.64 and 1.65 do): the check arrived, the
         # edit clears it before its own callback runs, so the state never changed —
         # no sign-off, and no "reopened" for a sign-off that was never logged.
         session[REVIEWED] = True
@@ -2933,7 +2933,7 @@ assert not closed.main.columns
             for e in runs[1]
             if e["event"] == "transcript_downloaded"
         )
-        # The edit + check in one rerun: Streamlit 1.64 runs the editor's callback
+        # The edit + check in one rerun: Streamlit 1.64 and 1.65 run the editor's callback
         # first, so the state never changed and nothing is logged. Were the checkbox's
         # to run first, a signed-off / reopened pair would be — never a lone
         # "reopened" for a sign-off that was never logged.
