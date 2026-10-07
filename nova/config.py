@@ -59,8 +59,8 @@ AUDIO_EXTENSIONS = (".mp3", ".m4a", ".wav", ".flac", ".ogg")
 # Words whose Deepgram per-word confidence is strictly BELOW this are flagged for review.
 # Deepgram calls word confidence a calibrated probability; its 0.65 example is the
 # high-precision/low-recall point. 0.90 flags ~6-7% of words on clean audio and catches
-# most model-estimated errors. Re-evaluate on a de-identified local sample; 0.85 is the
-# fallback if pilots flag >20% of words. Display-only: never sent to Deepgram, never a widget.
+# most model-estimated errors. Re-evaluate on a de-identified local sample with
+# scripts/calibrate.py; 0.85 is the fallback if pilots flag >20% of words. Display-only: never sent to Deepgram, never a widget.
 LOW_CONFIDENCE_THRESHOLD = 0.90
 
 # Sign-in / access control (nova/access.py). The policy itself — providers, allowed

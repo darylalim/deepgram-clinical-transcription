@@ -21,11 +21,8 @@ comes from the fictional script.
 
 import io
 import os
-import re
 import sys
 import wave
-from dataclasses import dataclass
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -35,8 +32,8 @@ from deepgram import DeepgramClient  # noqa: E402
 from dotenv import dotenv_values  # noqa: E402
 
 from nova.config import DEFAULT_MODEL, MODELS  # noqa: E402
-from nova.results import first_alternative, is_low_confidence, word_token  # noqa: E402
 from nova.transcribe import build_options  # noqa: E402
+from scripts.scoring import norm, score  # noqa: E402
 
 RUNS = 3
 RATES = {"clean 16 kHz": 16000, "phone 8 kHz": 8000}
@@ -67,76 +64,6 @@ DRUGS = [
     "methotrexate", "folic", "eliquis", "jardiance",
 ]  # fmt: skip
 TERMS = [*DRUGS, "cardiologist", "endocrinologist"]  # scored; DRUGS are the keyterms
-
-# Left out of scoring: numbers and the spoken date are formatting, not recognition.
-NUMBER_WORDS = {
-    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
-    "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
-    "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty",
-    "sixty", "seventy", "eighty", "ninety", "hundred", "thousand", "march",
-}  # fmt: skip
-UNITS = {"mg": "milligrams", "milligram": "milligrams"}
-
-
-def norm(text: str) -> list[str]:
-    """Lowercase words without punctuation, numbers or dates, units unified.
-
-    Applied identically to the script and the transcript, so formatting differences
-    (Smart Format writes "fifty" or "50", "03/14/1961" for "March 14, 1961") are
-    not scored as recognition errors.
-    """
-    text = re.sub(r"[^a-z0-9' ]", " ", text.lower().replace("-", " "))
-    words = [w.strip("'") for w in text.split() if w.strip("'")]
-    return [UNITS.get(w, w) for w in words if not w.isdigit() and w not in NUMBER_WORDS]
-
-
-@dataclass(frozen=True)
-class Score:
-    wer: float  # percent of reference words
-    dropped: int  # reference words with no transcript word at all (missing speech)
-    terms_missed: list[str]
-    flagged: dict[float, float]  # threshold -> percent of transcript words flagged
-    caught: dict[float, tuple[int, int]]  # threshold -> (wrong words flagged, wrong)
-
-
-def score(response: Any, reference: list[str]) -> Score:
-    """Score one transcript against the normalized reference.
-
-    A transcript word is "wrong" when it is not part of an exact alignment with the
-    reference. Flags use the app's own `is_low_confidence`, per Deepgram word (a
-    smart-formatted word may normalize to several pieces, all sharing its flag).
-    """
-    pieces: list[tuple[str, Any]] = []
-    for word in getattr(first_alternative(response), "words", None) or []:
-        pieces.extend((p, word) for p in norm(str(word_token(word))))
-    hyp = [p for p, _ in pieces]
-    correct = [False] * len(hyp)
-    errors = dropped = 0
-    matcher = SequenceMatcher(a=reference, b=hyp, autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            correct[j1:j2] = [True] * (j2 - j1)
-            continue
-        errors += max(i2 - i1, j2 - j1)
-        dropped += max(0, (i2 - i1) - (j2 - j1))
-    present = set(hyp)
-    flagged: dict[float, float] = {}
-    caught: dict[float, tuple[int, int]] = {}
-    wrong = [not ok for ok in correct]
-    for threshold in THRESHOLDS:
-        flags = [is_low_confidence(w, threshold) for _, w in pieces]
-        flagged[threshold] = 100 * sum(flags) / len(flags) if flags else 0.0
-        caught[threshold] = (
-            sum(f and x for f, x in zip(flags, wrong, strict=True)),
-            sum(wrong),
-        )
-    return Score(
-        wer=100 * errors / len(reference),
-        dropped=dropped,
-        terms_missed=[t for t in TERMS if t not in present],
-        flagged=flagged,
-        caught=caught,
-    )
 
 
 def synthesize(client: Any, rate: int) -> bytes:
@@ -189,17 +116,18 @@ def main() -> None:
                 response = client.listen.v1.media.transcribe_file(
                     request=audio, **build_options(**opts)
                 )
-                s = score(response, reference)
+                s = score(response, reference, THRESHOLDS)
+                missed = [t for t in TERMS if t not in s.words]
                 cells = "  ".join(
-                    f"@{t:.2f} flagged {s.flagged[t]:4.1f}% caught {s.caught[t][0]}/{s.caught[t][1]}"
+                    f"@{t:.2f} flagged {s.flagged_pct(t):4.1f}% caught {s.caught[t]}/{s.wrong}"
                     for t in THRESHOLDS
                 )
                 print(
                     f"  {name:24s} WER {s.wer:4.1f}%  dropped {s.dropped:3d}  "
-                    f"terms {len(TERMS) - len(s.terms_missed)}/{len(TERMS)}  {cells}"
+                    f"terms {len(TERMS) - len(missed)}/{len(TERMS)}  {cells}"
                 )
-                if s.terms_missed:
-                    print(f"  {'':24s} missed: {', '.join(s.terms_missed)}")
+                if missed:
+                    print(f"  {'':24s} missed: {', '.join(missed)}")
 
 
 if __name__ == "__main__":
