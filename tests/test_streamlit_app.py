@@ -844,6 +844,8 @@ class TestLowConfidenceFlags:
         for caption in (streamlit_app.LOW_CONFIDENCE_LEGEND, streamlit_app.NO_FLAGS):
             assert "90%" in caption
             assert "can still be wrong" in caption
+            # Omissions are invisible to word confidence: no word, no flag.
+            assert "missed speech leaves nothing to flag" in caption
         # Plain caption text: a colored sample would fail contrast at caption opacity.
         assert ":orange[" not in streamlit_app.LOW_CONFIDENCE_LEGEND
 

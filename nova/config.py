@@ -32,13 +32,15 @@ DEFAULT_MEASUREMENTS = False
 DEFAULT_DIARIZE = False
 
 # Redaction groups (Deepgram `redact` values) -> display labels.
-# PII (de-identification) is listed first; PHI and Numbers strip clinical content
+# PII (de-identification) is listed first. Live output (2026-10-07) showed PII also
+# tags occupations ("cardiologist" -> [OCCUPATION_1]) and time spans ("last month" ->
+# [DURATION_1]), which carry clinical context, so its label says so; PHI and Numbers strip clinical content
 # itself, so both are labeled to flag that trade-off in a medical workflow. Numbers is
 # Deepgram's 3+-consecutive-digit rule plus its number-like entities (dates, times,
 # ages, medical statistics, locations, ...), so "500 mg" is always redacted and
 # shorter clinical values only sometimes: an unpredictable, partly redacted note.
 REDACT_GROUPS = {
-    "pii": "PII — de-identify (names, locations, IDs)",
+    "pii": "PII — de-identify (names, locations, IDs, dates; also occupations, time spans)",
     "phi": "PHI — removes clinical content (conditions, drugs, injuries)",
     "pci": "PCI (card numbers)",
     "numbers": "Numbers — 3+ digits, dates, ages, medical statistics (hits clinical values)",
