@@ -14,7 +14,7 @@
 # from Streamlit's matching built-in base.
 #
 # Every contrast figure below is WCAG 2.x, computed against the exact color Streamlit
-# renders — including the ones it DERIVES rather than reads from here (1.64 frontend):
+# renders — including the ones it DERIVES rather than reads from here (1.64 frontend; re-checked identical on 1.65):
 #                          dark mode                     light mode
 #   <c>BackgroundColor  = <c>Color at 20% alpha         <c>Color at 10% alpha   (alerts, speaker tints)
 #   <c>TextColor        = <c>Color +15 HSL lightness    <c>Color -15 lightness  (alert body text,
