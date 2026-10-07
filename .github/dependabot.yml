@@ -1,6 +1,10 @@
 # Keeps the SHA-pinned GitHub Actions in .github/workflows/ fresh: Dependabot
 # opens PRs that bump each `uses: …@<sha>` pin (and its `# vX.Y.Z` comment) when
 # a new release ships, so pinning to an immutable SHA stays low-maintenance.
+# It also tracks the `==`-pinned Python dependencies (pyproject.toml + uv.lock),
+# so a release of authlib, cryptography or streamlit gets a PR instead of relying
+# on someone checking by hand. Only action bumps auto-merge
+# (dependabot-auto-merge.yml); Python bumps always wait for a human.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -12,5 +16,14 @@ updates:
     # are ungrouped by default, so an urgent advisory still lands on its own.
     groups:
       github-actions:
+        patterns:
+          - "*"
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    # One weekly PR for routine bumps, as above; security updates stay ungrouped.
+    groups:
+      python:
         patterns:
           - "*"

@@ -4,7 +4,9 @@ name: dependabot auto-merge
 # this enables GitHub's auto-merge on it, so the PR merges only once the required
 # CI checks pass. Majors are deliberately excluded — a major is where a breaking
 # change actually hides (setup-uv v10.0.0 disabled the cache on sensitive events),
-# so those still get a human.
+# so those still get a human. So is every Python (uv) bump: those change code that
+# runs in production and handles sign-in (authlib, cryptography, streamlit), and
+# the tests mock Deepgram and the identity provider, so green CI is not enough.
 #
 # `pull_request_target` is required here, not incidental: a `pull_request` run
 # triggered by Dependabot gets a READ-ONLY GITHUB_TOKEN that a `permissions:`
@@ -50,7 +52,11 @@ jobs:
         # keeps the whole PR manual. `--auto` queues the merge behind the required
         # checks instead of merging now; `--merge` matches this repo's history.
         # The PR URL goes through an env var, not a `${{ }}` shell interpolation.
-        if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        # Actions only: `package-ecosystem` is the branch's ecosystem segment
+        # (dependabot/github_actions/…), so a uv PR never reaches this step.
+        if: >-
+          steps.metadata.outputs.package-ecosystem == 'github_actions' &&
+          steps.metadata.outputs.update-type != 'version-update:semver-major'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
