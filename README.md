@@ -8,7 +8,7 @@ Streamlit application for clinical transcription using Deepgram's Nova-3 Medical
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">
-  <img alt="The app signed in as dr.rivera@hospital.example. The settings sidebar has the keyterms lisinopril and hydrochlorothiazide, with Smart Format and Diarize on. The Upload tab holds clinic-visit.wav. The transcript panel shows an audio player, Duration, Confidence and Low-confidence words metrics, and color-coded Speaker 1 and Speaker 2 lines with two words flagged in bold orange. The Download button reads 'Download locked — 0/1 reviewed'." src="docs/screenshot-light.png">
+  <img alt="The app signed in as dr.rivera@hospital.example. The settings sidebar has Model set to Nova-3 Medical, the keyterms lisinopril and hydrochlorothiazide, and Smart Format and Diarize on. The Upload tab holds clinic-visit.wav. The transcript panel, headed 'Transcript · Nova-3 Medical', shows an audio player, Duration, Confidence and Low-confidence words metrics, and color-coded Speaker 1 and Speaker 2 lines with two words flagged in bold orange. The Download button reads 'Download locked — 0/1 reviewed'." src="docs/screenshot-light.png">
 </picture>
 
 <sub>Screenshot uses a synthetic, fictional transcript and a simulated sign-in — no real patient audio or account.</sub>
