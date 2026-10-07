@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Streamlit application for medical transcription using Deepgram's Nova-3 Medical model, with Nova-3 Pharma (drug names) selectable per run.
+Streamlit application for clinical transcription using Deepgram's Nova-3 Medical model, with Nova-3 Pharma (drug names) selectable per run.
 
 A Streamlit-free core (`nova/`) is consumed **in-process** by the Streamlit UI (`streamlit_app.py`): it builds options, runs batches, parses responses, decides who may sign in, and writes the PHI-free audit trail, keeping that logic framework-free and unit-testable independent of the UI.
 
