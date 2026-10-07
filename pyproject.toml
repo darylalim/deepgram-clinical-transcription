@@ -4,7 +4,7 @@ name = "deepgram-clinical-transcription"
 # gates on CI, creates the vX.Y.Z tag, and publishes the GitHub Release. Keep it
 # static and plain X.Y.Z — the workflow refuses anything else, and
 # tests/test_release_workflow.py pins the same shape so a bad bump fails locally.
-version = "0.9.0"
+version = "0.10.0"
 description = "Streamlit application for medical transcription using Deepgram's Nova-3 Medical model."
 readme = "README.md"
 authors = [{ name = "Daryl Lim" }]
