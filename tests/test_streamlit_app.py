@@ -73,6 +73,7 @@ class TestProcessInputs:
         streamlit_app._process_inputs(
             "test-key",
             [("test.wav", FAKE_AUDIO)],
+            model="nova-3-pharma",
             keyterms=["metformin"],
             language="en-GB",
             diarize=True,
@@ -82,6 +83,7 @@ class TestProcessInputs:
         )
 
         kwargs = mock_deepgram_cls.return_value.listen.v1.media.transcribe_file.call_args.kwargs
+        assert kwargs["model"] == "nova-3-pharma"
         assert kwargs["keyterm"] == ["metformin"]
         assert kwargs["language"] == "en-GB"
         assert kwargs["diarize"] is True
@@ -470,6 +472,7 @@ class TestRunAudit:
                 "n_failed",
                 "n_skipped",
                 "n_keyterms",
+                "model",
                 "language",
                 "redact",
             )
@@ -483,6 +486,7 @@ class TestRunAudit:
             "n_failed": 1,
             "n_skipped": 0,
             "n_keyterms": 1,
+            "model": "nova-3-medical",
             "language": "en",
             "redact": [],
         }
@@ -581,10 +585,11 @@ class TestRunAudit:
         mock_deepgram_cls.assert_not_called()
         assert capsys.readouterr().out == ""
 
+    @pytest.mark.parametrize("key", ["model", "language"])
     def test_unknown_option_fails_before_any_audio_is_sent(
-        self, mock_deepgram_cls, mock_st, capsys
+        self, key, mock_deepgram_cls, mock_st, capsys
     ):
-        mock_st.session_state["language"] = "Jane_Doe_MRN12345"
+        mock_st.session_state[key] = "Jane_Doe_MRN12345"
 
         with pytest.raises(AuditSchemaError) as exc:
             streamlit_app._run("key", [mock_upload("a.wav", b"a")], None)
@@ -1185,6 +1190,7 @@ class TestReviewAudit:
 class TestFeatureOpts:
     def test_defaults_when_session_empty(self, mock_st):
         assert streamlit_app._feature_opts() == {
+            "model": "nova-3-medical",
             "keyterms": [],
             "language": "en",
             "smart_format": True,
@@ -1197,6 +1203,7 @@ class TestFeatureOpts:
     def test_reads_values_from_session_state(self, mock_st):
         mock_st.session_state.update(
             {
+                "model": "nova-3-pharma",
                 "keyterms": ["metformin"],
                 "language": "en-GB",
                 "smart_format": False,
@@ -1208,6 +1215,7 @@ class TestFeatureOpts:
         )
 
         assert streamlit_app._feature_opts() == {
+            "model": "nova-3-pharma",
             "keyterms": ["metformin"],
             "language": "en-GB",
             "smart_format": False,
@@ -1221,6 +1229,7 @@ class TestFeatureOpts:
         mock_st.session_state.update({"language": "en-GB", "diarize": True})
 
         assert streamlit_app._feature_opts() == {
+            "model": "nova-3-medical",
             "keyterms": [],
             "language": "en-GB",
             "smart_format": True,
@@ -2581,11 +2590,12 @@ captions = [c.value for c in output.caption]
 assert captions[0] == ":material/description: Transcript", captions
 assert any("Select audio, then click Run" in c for c in captions[1:]), captions
 
-# Features live in the sidebar and render in the intended order: inputs (Language,
-# Keyterm) first, the four toggles grouped, Redact deliberately last.
+# Features live in the sidebar and render in the intended order: inputs (Model,
+# Language, Keyterm) first, the four toggles grouped, Redact deliberately last.
 order = []
 _widget_keys_in_order(at.sidebar, order)
 assert [k for k in order if not k.startswith("FormSubmitter")] == [
+    "model",
     "language",
     "keyterms",
     "smart_format",

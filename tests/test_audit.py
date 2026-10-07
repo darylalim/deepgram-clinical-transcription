@@ -51,11 +51,27 @@ ENVELOPE = ["v", "ts", "event", "outcome", "user", "auth", "session"]
 # Typed Any: these tests pass values the signatures forbid, as a caller bug would.
 PHI: Any = "Jane_Doe_MRN12345.wav"
 OPTIONS = run_options(
+    model="nova-3-pharma",  # not the default, so the line proves it is carried through
     keyterms=["hydroxyzine", "cetirizine"],
     language="en-US",
     diarize=True,
     redact=["pii", "numbers"],
 )
+
+
+def _hand_built_options(**overrides: Any) -> RunOptions:
+    """RunOptions built directly, skipping `run_options`' checks, as a caller bug would."""
+    fields: dict[str, Any] = {
+        "model": "nova-3-medical",
+        "language": None,
+        "smart_format": True,
+        "diarize": False,
+        "dictation": False,
+        "measurements": False,
+        "redact": (),
+        "n_keyterms": 0,
+    }
+    return RunOptions(**(fields | overrides))
 
 
 def _any(value: object) -> Any:
@@ -116,6 +132,7 @@ class TestBuilders:
                     "n_ok": 2,
                     "n_failed": 1,
                     "n_skipped": 1,
+                    "model": "nova-3-pharma",
                     "language": "en-US",
                     "smart_format": True,
                     "diarize": True,
@@ -268,6 +285,10 @@ class TestRejections:
                 id="filename-as-run",
             ),
             pytest.param(
+                lambda: run_options(model=PHI),
+                id="unknown-model",
+            ),
+            pytest.param(
                 lambda: run_options(language=PHI),
                 id="unknown-language",
             ),
@@ -359,9 +380,20 @@ class TestRejections:
                     n_items=1,
                     n_ok=1,
                     n_skipped=0,
-                    options=RunOptions(PHI, True, False, False, False, (), 0),
+                    options=_hand_built_options(language=PHI),
                 ),
                 id="hand-built-options",
+            ),
+            pytest.param(
+                lambda: transcription_run(
+                    run=RUN,
+                    input_kind="upload",
+                    n_items=1,
+                    n_ok=1,
+                    n_skipped=0,
+                    options=_hand_built_options(model=PHI),
+                ),
+                id="hand-built-model",
             ),
             pytest.param(
                 lambda: transcript_downloaded(run=RUN, n_results=1, n_edited=2),
@@ -553,6 +585,7 @@ class TestRunOptions:
 
     def test_defaults(self):
         assert run_options() == RunOptions(
+            model="nova-3-medical",
             language=None,
             smart_format=True,
             diarize=False,

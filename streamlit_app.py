@@ -29,12 +29,14 @@ from nova.config import (
     DEFAULT_DICTATION,
     DEFAULT_LANGUAGE,
     DEFAULT_MEASUREMENTS,
+    DEFAULT_MODEL,
     DEFAULT_SMART_FORMAT,
     LANGUAGES as _LANGUAGES,
     LOW_CONFIDENCE_THRESHOLD,
     MAX_FILE_SIZE,
     MAX_KEYTERMS,
     MAX_UPLOADS,
+    MODELS as _MODELS,
     REDACT_GROUPS as _REDACT_GROUPS,
 )
 from nova.results import (
@@ -442,6 +444,7 @@ def _process_inputs(api_key: str, files: list[tuple[str, bytes]], **opts) -> int
 def _feature_opts() -> dict[str, Any]:
     """Read the sidebar Features form's control values from session state."""
     return {
+        "model": st.session_state.get("model", DEFAULT_MODEL),
         "keyterms": st.session_state.get("keyterms", []),
         "language": st.session_state.get("language", DEFAULT_LANGUAGE),
         "smart_format": st.session_state.get("smart_format", DEFAULT_SMART_FORMAT),
@@ -1069,7 +1072,7 @@ st.set_page_config(
 
 st.title("Deepgram Medical Transcription")
 st.caption(
-    "Transcribe clinical audio with Deepgram's Nova-3 Medical model — "
+    "Transcribe clinical audio with Deepgram's Nova-3 Medical or Pharma model — "
     "speaker labels, measurement formatting, and PII/PHI redaction."
 )
 
@@ -1139,6 +1142,13 @@ with st.sidebar:
         _account_panel(access_decision.email)
     st.caption(":material/tune: Transcription settings")
     with st.form("features", border=False):
+        st.selectbox(
+            "Model",
+            options=list(_MODELS),
+            format_func=lambda model: _MODELS[model],
+            help="Medical suits clinician–patient encounters and dictation. Pharma is tuned for drug names — pharmacy calls and refill requests. Both accept the same languages.",
+            key="model",
+        )
         st.selectbox(
             "Language",
             options=list(_LANGUAGES),

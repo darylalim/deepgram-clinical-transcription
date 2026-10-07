@@ -27,6 +27,9 @@ class TestBuildOptions:
         ):
             assert absent not in opts
 
+    def test_model_selectable(self):
+        assert build_options(model="nova-3-pharma")["model"] == "nova-3-pharma"
+
     def test_smart_format_off(self):
         assert build_options(smart_format=False)["smart_format"] is False
 
