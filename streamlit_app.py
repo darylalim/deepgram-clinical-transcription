@@ -995,11 +995,12 @@ NO_TRANSCRIPT = "No transcript in this response."
 LOW_CONFIDENCE_LEGEND = (
     ":material/flag: Words in **bold orange** scored below "
     f"{LOW_CONFIDENCE_THRESHOLD:.0%} model confidence — check them against the audio. "
-    "Unmarked words can still be wrong."
+    "Unmarked words can still be wrong, and missed speech leaves nothing to flag."
 )
 NO_FLAGS = (
     f"No words scored below {LOW_CONFIDENCE_THRESHOLD:.0%} model confidence. "
-    "Unmarked words can still be wrong — check against the audio."
+    "Unmarked words can still be wrong, and missed speech leaves nothing to flag — "
+    "check against the audio."
 )
 NO_CONFIDENCE = (
     "Low-confidence highlighting isn't available for this result — "
@@ -1220,7 +1221,7 @@ with st.sidebar:
             options=list(_REDACT_GROUPS),
             format_func=lambda group: _REDACT_GROUPS[group],
             placeholder="Select information to redact...",
-            help='Replaces the selected information with redaction tags in the transcript. For de-identification, use PII (names, locations, IDs). Note: PHI redaction strips clinical content itself (conditions, drugs, injuries), and Numbers redaction removes any run of 3+ digits plus number-like entities (e.g. dates, times, ages, medical statistics, locations), so it redacts clinical values unpredictably ("500 mg" always, shorter values sometimes) — usually the opposite of what a medical transcript should keep.',
+            help='Replaces the selected information with redaction tags in the transcript. For de-identification, use PII (names, locations, IDs, dates of birth) — note it also removes occupations such as "cardiologist" and time spans such as "last month", which can carry clinical context. Note: PHI redaction strips clinical content itself (conditions, drugs, injuries), and Numbers redaction removes any run of 3+ digits plus number-like entities (e.g. dates, times, ages, medical statistics, locations), so it redacts clinical values unpredictably ("500 mg" always, shorter values sometimes) — usually the opposite of what a medical transcript should keep.',
             key="redact",
         )
         has_input = bool(uploaded_files or recording is not None)

@@ -170,6 +170,16 @@ class TestIsRedactionTag:
     def test_tags(self, token):
         assert is_redaction_tag(token)
 
+    @pytest.mark.parametrize(
+        "token",
+        # Observed live (2026-10-07): PII redaction of a synthetic call on both
+        # nova-3-medical and nova-3-pharma, as `punctuated_word` values in words[].
+        ["[NAME_1].", "[DOB_1].", "[OCCUPATION_1]", "[DURATION_2]", "[NAME_GIVEN_1]"],
+    )
+    def test_observed_deepgram_tags(self, token):
+        assert is_redaction_tag(token)
+        assert not is_low_confidence(_word(token, 0.1))
+
     @pytest.mark.parametrize("token", ["SSN_1", "[1]", "[SSN_1]x", "[", "", None])
     def test_not_tags(self, token):
         assert not is_redaction_tag(token)
