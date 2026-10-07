@@ -40,7 +40,9 @@ def build_options(
     return {
         "model": MODEL,
         "smart_format": smart_format,
-        **({"diarize": True} if diarize else {}),
+        # `diarize_model` replaces the deprecated `diarize=true` (a request with both is
+        # rejected); "latest" tracks Deepgram's current diarizer.
+        **({"diarize_model": "latest"} if diarize else {}),
         **({"measurements": True} if measurements else {}),
         # Dictation requires punctuation, so enable both together.
         **({"dictation": True, "punctuate": True} if dictation else {}),
