@@ -97,7 +97,7 @@ class TestProcessInputs:
         assert kwargs["model"] == "nova-3-pharma"
         assert kwargs["keyterm"] == ["metformin"]
         assert kwargs["language"] == "en-GB"
-        assert kwargs["diarize"] is True
+        assert kwargs["diarize_model"] == "latest"
         assert "measurements" not in kwargs
         assert kwargs["request_options"] == {
             "additional_query_parameters": {"redact": ["pii"]}
