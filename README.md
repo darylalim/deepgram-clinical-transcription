@@ -202,6 +202,8 @@ uv run ty check .     # type check
 
 Tests mock the Deepgram client — no real API calls. The core is tested directly (`tests/test_transcribe.py`, `tests/test_results.py`, `tests/test_access.py`, `tests/test_audit.py`), the Streamlit adapter in `tests/test_streamlit_app.py`, the dev hooks in `tests/test_hooks.py`, and the project's config — the CI and release workflows, the Dependabot config, and the license — in `tests/test_ci_workflow.py`, `tests/test_release_workflow.py`, `tests/test_dependabot.py`, and `tests/test_license.py`.
 
+**Live check against the real API** — because tests mock Deepgram, `uv run python scripts/live_check.py` is the way to confirm the real API accepts every option with every model, for example after adding a model or option. It sends Deepgram's public NASA spacewalk sample (no patient data) with exactly the options the app builds, and prints only status, word counts and the low-confidence share. It makes real, billed requests with your `DEEPGRAM_API_KEY`, so CI never runs it; `tests/test_live_check.py` only checks that its cases still match `build_options`. A pass means the options were accepted, not that each one changed the output.
+
 **Continuous integration** — `.github/workflows/ci.yml` (GitHub Actions) runs these same four gates plus `uv sync --locked` across a Python 3.12 + 3.13 matrix on every push to `main`, every pull request, and manual dispatch. It needs no secrets: tests mock Deepgram, so CI never calls the API. The two matrix legs report as the `checks (3.12)` / `checks (3.13)` status checks that `main` requires, so the job id and matrix values are a branch-protection contract — `tests/test_ci_workflow.py` pins them.
 
 ## Releases
