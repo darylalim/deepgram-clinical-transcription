@@ -1,10 +1,11 @@
 """Transcription constants — the single source of truth for the Streamlit UI."""
 
-# Deepgram `model` values -> display labels. Medical is the default: Pharma is tuned for
-# drug names (pharmacy calls, refills), so general clinical encounters stay on Medical.
+# Deepgram `model` values -> display names (also shown on each result and in the export).
+# Medical is the default: Pharma is tuned for drug names (pharmacy calls, refills), so
+# general clinical encounters stay on Medical.
 MODELS = {
-    "nova-3-medical": "Nova-3 Medical — clinical encounters and dictation",
-    "nova-3-pharma": "Nova-3 Pharma — drug names (pharmacy, refills)",
+    "nova-3-medical": "Nova-3 Medical",
+    "nova-3-pharma": "Nova-3 Pharma",
 }
 DEFAULT_MODEL = next(iter(MODELS))
 

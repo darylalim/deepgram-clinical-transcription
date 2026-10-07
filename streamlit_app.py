@@ -300,7 +300,15 @@ def _audit_actor() -> audit.Actor:
 # Session-state keys holding PHI (or keyed to it) that sign-out removes, plus the
 # signed-in audit identity and review-audit record, which must not outlive the sign-in.
 _PURGED_KEYS = frozenset(
-    {"responses", "audio_sources", "run_id", "keyterms", "audit_actor", "audit_review"}
+    {
+        "responses",
+        "audio_sources",
+        "run_id",
+        "run_model",
+        "keyterms",
+        "audit_actor",
+        "audit_review",
+    }
 )
 _PURGED_PREFIXES = ("transcript_", "reviewed_", "uploads_", "recording_")
 
@@ -430,6 +438,9 @@ def _transcribe_batch(
     # unchecked Reviewed boxes (Streamlit purges the old run's keys at the end of
     # this full rerun, since nothing renders them again).
     st.session_state["run_id"] = uuid.uuid4().hex
+    # The model this batch was sent to, so the panel and the export can name it even
+    # after the sidebar selection changes.
+    st.session_state["run_model"] = options["model"]
 
     _completion_toast(len(ok), total)
     return len(ok)
@@ -695,9 +706,18 @@ def _is_reviewed(run_id: str, index: int) -> bool:
     return st.session_state.get(_reviewed_key(run_id, index)) is True
 
 
-def _export_blob(named_texts: list[tuple[str, str]]) -> str:
-    """The downloaded file: one `name` line then its text per result, blank-line separated."""
-    return "\n\n".join(f"{name}\n{text}" for name, text in named_texts)
+def _model_name(model: object) -> str | None:
+    """The display name of a run's model, or None when unknown (no run yet)."""
+    return _MODELS.get(model) if isinstance(model, str) else None
+
+
+def _export_blob(named_texts: list[tuple[str, str]], model_name: str | None) -> str:
+    """The downloaded file: a `Model:` line (when known), then one `name` line and its
+    text per result, blank-line separated."""
+    blocks = [f"{name}\n{text}" for name, text in named_texts]
+    if model_name is not None:
+        blocks.insert(0, f"Model: Deepgram {model_name}")
+    return "\n\n".join(blocks)
 
 
 def _deferred_export(
@@ -705,13 +725,15 @@ def _deferred_export(
     actor: audit.Actor,
     event: audit.AuditEvent,
     expires_at: float | None,
+    model_name: str | None,
 ) -> Callable[[], str]:
     """Zero-arg `data` callable for the download button, over values captured now.
 
     Streamlit runs it on every click, on a worker thread with no ScriptRunContext, so
     it must never touch `st.*` (session state included): it closes over plain
-    strings, the audit actor, the already-validated `transcript_downloaded` event,
-    and the sign-in's expiry, all captured at render. A click after that expiry is
+    strings (the model's display name included), the audit actor, the
+    already-validated `transcript_downloaded` event, and the sign-in's expiry, all
+    captured at render. A click after that expiry is
     refused — the button can outlive it on an idle page, and a click reruns
     nothing. Otherwise it logs the event, then returns the file — one audit line per
     file generated. It raises only on expiry or if the line cannot be written, both
@@ -725,7 +747,7 @@ def _deferred_export(
         if _expired(expires_at):
             raise PermissionError(DOWNLOAD_EXPIRED)
         audit.emit(actor, event)
-        return _export_blob(captured)
+        return _export_blob(captured, model_name)
 
     return _build
 
@@ -904,6 +926,7 @@ def _transcript_download(
             _audit_actor(),
             event,
             st.session_state.get("access_expires_at"),
+            _model_name(st.session_state.get("run_model")),
         )
     st.download_button(
         DOWNLOAD_LABEL if unlocked else f"Download locked — {done}/{n} reviewed",
@@ -1055,7 +1078,11 @@ def _render_output() -> None:
     responses = st.session_state.get("responses", [])
     audio_sources = st.session_state.get("audio_sources", [])
     run_id = st.session_state.get("run_id", "")
-    st.caption(":material/description: Transcript")
+    model_name = _model_name(st.session_state.get("run_model")) if responses else None
+    st.caption(
+        ":material/description: Transcript"
+        + (f" · {_escape_markdown(model_name)}" if model_name else "")
+    )
     # The download row sits above the panel but is filled after it: the gate reads
     # the review widgets' own return values, which exist only once they render.
     download_row = st.empty()

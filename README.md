@@ -72,6 +72,8 @@ A **Features** panel in the left sidebar holds the request options, closed by a 
 - **Measurements** (off by default) — abbreviates spoken units (e.g. "five milligrams" → "5 mg"). Volumes come out as lowercase "ml" / "l", which [ISMP](https://www.ismp.org/recommendations/error-prone-abbreviations-list) lists as error-prone (use mL / L), so review volumes before clinical use
 - **Redact** (none by default) — replaces selected information with redaction tags. Four groups are selectable: **PII** de-identifies (names, locations, IDs); **PHI** removes clinical content itself (conditions, drugs, injuries); **PCI** redacts card numbers; **Numbers** redacts any run of three or more digits plus Deepgram's number-like entities (e.g. dates, times, ages, phone and account numbers, medical statistics, locations) — so clinical values are redacted unpredictably ("500 mg" always, shorter doses, vitals, and lab values only sometimes).
 
+The model each Run used is shown in the Transcript header and as the first line of the downloaded file, so changing the selection afterwards cannot mislabel a result.
+
 Once a request runs:
 
 - **Live progress** — a status panel tracks the batch, with a toast when it finishes.
@@ -166,10 +168,10 @@ The app records who did what, and when, as one JSON object per line on the serve
 | `review_reopened` | a reviewed result is made unreviewed again | `success` | `run`, `result_index`, `n_results` |
 | `transcript_downloaded` | a download file is generated (every click) | `success` | `run`, `n_results`, `n_edited` |
 
-Every line starts with the same envelope, in this order: `v` (schema version, `1`), `ts` (UTC, milliseconds), `event`, `outcome`, `user`, `auth`, `session`. For example:
+Every line starts with the same envelope, in this order: `v` (schema version, `2` — bumped from `1` when `transcription_run` gained `model`), `ts` (UTC, milliseconds), `event`, `outcome`, `user`, `auth`, `session`. For example:
 
 ```json
-{"v":1,"ts":"2026-09-28T14:03:12.345Z","event":"transcription_run","outcome":"partial","user":"dr.smith@hospital.org","auth":"oidc","session":"<32 hex>","run":"<32 hex>","input_kind":"upload","n_items":3,"n_ok":2,"n_failed":1,"n_skipped":1,"model":"nova-3-medical","language":"en-US","smart_format":true,"diarize":true,"dictation":false,"measurements":false,"redact":["numbers","pii"],"n_keyterms":2}
+{"v":2,"ts":"2026-09-28T14:03:12.345Z","event":"transcription_run","outcome":"partial","user":"dr.smith@hospital.org","auth":"oidc","session":"<32 hex>","run":"<32 hex>","input_kind":"upload","n_items":3,"n_ok":2,"n_failed":1,"n_skipped":1,"model":"nova-3-medical","language":"en-US","smart_format":true,"diarize":true,"dictation":false,"measurements":false,"redact":["numbers","pii"],"n_keyterms":2}
 ```
 
 - **Who.** `user` is the signed-in email (`auth` `oidc`), `anonymous` in anonymous mode, or null (`auth` `none`) when sign-in is unavailable. A refused account's email is recorded in its `access_denied` line. `session` is a random id per browser session, and `run` is a random id per Run that links it to its sign-offs and downloads. `result_index` is a result's position in the batch, starting at 0.

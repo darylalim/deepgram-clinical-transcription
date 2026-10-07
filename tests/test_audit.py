@@ -89,7 +89,7 @@ def _line(event, capsys, actor=ACTOR):
 
 def _envelope(event, outcome, actor=ACTOR):
     return {
-        "v": 1,
+        "v": 2,
         "ts": TS,
         "event": event,
         "outcome": outcome,
@@ -199,7 +199,7 @@ class TestBuilders:
 
         out = capsys.readouterr().out
         assert out == (
-            '{"v":1,"ts":"2026-09-28T14:03:12.345Z","event":"session_start",'
+            '{"v":2,"ts":"2026-09-28T14:03:12.345Z","event":"session_start",'
             '"outcome":"success","user":"anonymous","auth":"anonymous",'
             f'"session":"{SESSION}"}}\n'
         )

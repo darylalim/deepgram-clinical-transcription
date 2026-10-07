@@ -45,7 +45,9 @@ from nova.config import (
 )
 
 LOGGER_NAME = "nova.audit"
-SCHEMA_VERSION = 1
+# Bump on any change to an event's field set; consumers may check exact fields.
+# 2: transcription_run gained `model`.
+SCHEMA_VERSION = 2
 # The handler is found again by NAME, not isinstance: Streamlit re-imports nova/ on a
 # source change (hot reload), which defines a new handler class while the process-wide
 # logger keeps the old handler — an isinstance guard would then add a second one.
