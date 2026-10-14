@@ -22,8 +22,8 @@ dependencies = [
 dev = [
     "pytest==9.1.1",
     "pyyaml==6.0.3",
-    "ruff==0.16.10",
-    "ty==0.0.84",
+    "ruff==0.17.0",
+    "ty==0.0.86",
     "watchdog==6.0.0",
 ]
 
