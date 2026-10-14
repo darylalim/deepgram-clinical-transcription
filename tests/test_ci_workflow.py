@@ -15,17 +15,12 @@ workflow with PyYAML and pin the invariants it exists to hold:
    plus the matrix values ``["3.12", "3.13"]`` are the *sole* source of the
    ``checks (3.12)`` / ``checks (3.13)`` contexts the ``main`` ruleset requires.
    Rename the job, give it a ``name:``, or drop a leg, and a required context is
-   never reported again — GitHub holds it pending forever, every PR becomes
-   unmergeable, and ``gh pr merge --auto`` in ``dependabot-auto-merge.yml`` waits
-   on something that will never arrive. Nothing surfaces an error, which is why
-   it is pinned here.
-3. **``workflow_call`` stays available.** ``release.yml`` calls this file as a
-   local reusable workflow to gate a release on the gates passing at that commit;
-   removing the trigger fails that run instantly.
-4. **Third-party actions are SHA-pinned.** ``ci.yml`` is the only workflow in the
+   never reported again — GitHub holds it pending forever and every PR becomes
+   unmergeable. Nothing surfaces an error, which is why it is pinned here.
+3. **Third-party actions are SHA-pinned.** ``ci.yml`` is the only workflow in the
    repo with third-party ``uses:`` steps, so it is the only one where this can
    actually regress.
-5. **It stays least-privilege and injection-safe.** No ``write`` permission
+4. **It stays least-privilege and injection-safe.** No ``write`` permission
    scope anywhere; it triggers on ``pull_request`` (never the write-privileged
    ``pull_request_target``); and no ``run:`` step interpolates attacker-
    controllable ``github.event.*`` / ``github.head_ref`` / ``inputs.*`` text
@@ -144,18 +139,9 @@ def test_required_status_check_names_are_pinned(workflow: dict) -> None:
     assert job["strategy"].get("fail-fast") is False
 
 
-def test_ci_is_callable_as_a_reusable_workflow(workflow: dict) -> None:
-    # release.yml's `gate` job is `uses: ./.github/workflows/ci.yml`; without this
-    # trigger that run fails immediately with "does not have a workflow_call
-    # trigger", and a release would be cut with no gate at all.
-    assert "workflow_call" in _triggers(workflow), (
-        "release.yml calls ci.yml as a reusable workflow — keep `workflow_call:`"
-    )
-
-
 def test_actions_are_sha_pinned(workflow: dict) -> None:
-    # ci.yml is the only workflow here with third-party `uses:` steps, matching
-    # the same assertion in test_release_workflow.py / test_automerge_workflow.py.
+    # ci.yml is the only workflow in the repo, so this is the only place an
+    # unpinned third-party action could appear.
     uses = [
         s["uses"]
         for s in workflow["jobs"]["checks"]["steps"]

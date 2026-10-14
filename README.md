@@ -201,7 +201,7 @@ uv run ruff format .  # format
 uv run ty check .     # type check
 ```
 
-Tests mock the Deepgram client — no real API calls. The core is tested directly (`tests/test_transcribe.py`, `tests/test_results.py`, `tests/test_access.py`, `tests/test_audit.py`), the Streamlit adapter in `tests/test_streamlit_app.py`, the dev hooks in `tests/test_hooks.py`, and the project's config — the CI and release workflows, the Dependabot config, and the license — in `tests/test_ci_workflow.py`, `tests/test_release_workflow.py`, `tests/test_dependabot.py`, and `tests/test_license.py`.
+Tests mock the Deepgram client — no real API calls. The core is tested directly (`tests/test_transcribe.py`, `tests/test_results.py`, `tests/test_access.py`, `tests/test_audit.py`), the Streamlit adapter in `tests/test_streamlit_app.py`, the dev hooks in `tests/test_hooks.py`, and the project's config — the CI workflow and the license — in `tests/test_ci_workflow.py` and `tests/test_license.py`.
 
 **Live check against the real API** — because tests mock Deepgram, `uv run python scripts/live_check.py` is the way to confirm the real API accepts every option with every model, for example after adding a model or option. It sends Deepgram's public NASA spacewalk sample (no patient data) with exactly the options the app builds, and prints only status, word counts and the low-confidence share. It makes real, billed requests with your `DEEPGRAM_API_KEY`, so CI never runs it; `tests/test_live_check.py` only checks that its cases still match `build_options`. A pass means the options were accepted, not that each one changed the output.
 
@@ -213,19 +213,14 @@ Tests mock the Deepgram client — no real API calls. The core is tested directl
 
 ## Releases
 
-Releases are cut by bumping the version. Edit `[project].version` in `pyproject.toml` and land it on `main`:
+Releases are cut by hand. Bump `[project].version` in `pyproject.toml`, land it on `main`, wait for CI to pass, then tag and publish from that commit:
 
-```toml
-version = "0.9.0"
+```bash
+git switch main && git pull
+gh release create v0.12.0 --target main --generate-notes
 ```
 
-`.github/workflows/release.yml` does the rest. It reads the declared version, and if `v0.9.0` is not tagged yet it runs the full CI matrix at that commit, creates the tag, and publishes a [GitHub Release](https://github.com/darylalim/deepgram-clinical-transcription/releases) with notes auto-generated from the merged pull requests since the previous release. A push that does not change the version is a no-op, so re-running is always safe.
-
-Three things worth knowing:
-
-- **Nothing is tagged from a red commit.** The `main` ruleset requires CI but does not require a pull request, so a direct push could otherwise skip it. The workflow gates on `ci.yml` itself before tagging.
-- **Hand-tagging still works** as an escape hatch — it is the only way to release a commit that is not `main`'s HEAD — but the tag must match the version declared at that commit, or the run fails rather than publishing a Release that lies.
-- **It needs no secrets.** Tagging and publishing happen in one run using the default `GITHUB_TOKEN`. A split "tag here, publish there" design would need a long-lived credential, because GitHub will not start a workflow run from a ref that token created.
+`--generate-notes` writes the notes from the pull requests merged since the previous release. Keep the tag equal to the declared version.
 
 ## Claude Code hooks
 
